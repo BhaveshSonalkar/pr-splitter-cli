@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"pr-splitter-cli/internal/types"
+
+	"gopkg.in/yaml.v2"
 )
 
 // ConfigDefaults holds default configuration values
@@ -68,6 +70,61 @@ func GetFromUser() (*types.Config, error) {
 
 	fmt.Println("✅ Configuration complete!")
 	fmt.Println()
+
+	return config, nil
+}
+
+// ConfigFile represents the YAML configuration file structure
+type ConfigFile struct {
+	TargetBranch     string   `yaml:"target_branch"`
+	BranchPrefix     string   `yaml:"branch_prefix"`
+	MaxPartitionSize int      `yaml:"max_partition_size"`
+	MaxPartitions    int      `yaml:"max_partitions"`
+	Strategy         string   `yaml:"strategy"`
+	ExcludedPaths    []string `yaml:"excluded_paths"`
+}
+
+// LoadFromFile loads configuration from a YAML file
+func LoadFromFile(filePath string) (*types.Config, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var configFile ConfigFile
+	if err := yaml.Unmarshal(data, &configFile); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML config: %w", err)
+	}
+
+	// Convert to internal config structure with defaults
+	config := &types.Config{
+		MaxFilesPerPartition: ConfigDefaults.MaxFilesPerPartition,
+		MaxPartitions:        ConfigDefaults.MaxPartitions,
+		BranchPrefix:         ConfigDefaults.BranchPrefix,
+		Strategy:             ConfigDefaults.Strategy,
+		TargetBranch:         ConfigDefaults.TargetBranch,
+	}
+
+	// Apply values from file
+	if configFile.TargetBranch != "" {
+		config.TargetBranch = configFile.TargetBranch
+	}
+	if configFile.BranchPrefix != "" {
+		config.BranchPrefix = configFile.BranchPrefix
+	}
+	if configFile.MaxPartitionSize > 0 {
+		config.MaxFilesPerPartition = configFile.MaxPartitionSize
+	}
+	if configFile.MaxPartitions > 0 {
+		config.MaxPartitions = configFile.MaxPartitions
+	}
+	if configFile.Strategy != "" {
+		config.Strategy = configFile.Strategy
+	}
+
+	if err := ValidateConfig(config); err != nil {
+		return nil, fmt.Errorf("invalid configuration in file: %w", err)
+	}
 
 	return config, nil
 }

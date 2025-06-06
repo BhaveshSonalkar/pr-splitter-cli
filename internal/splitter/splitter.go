@@ -29,22 +29,28 @@ func New() *Splitter {
 	}
 }
 
-// Split performs the complete PR splitting process
+// Split performs the complete PR splitting process with smart configuration
 func (s *Splitter) Split(sourceBranch string) (*types.SplitResult, error) {
-	// Step 1: Get configuration with smart recommendations
+	// Get configuration with smart recommendations
 	fmt.Println("🔍 Analyzing repository for configuration recommendations...")
 	cfg, err := s.getSmartConfiguration(sourceBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
 
+	return s.SplitWithConfig(sourceBranch, cfg)
+}
+
+// SplitWithConfig performs the splitting process with provided configuration
+func (s *Splitter) SplitWithConfig(sourceBranch string, cfg *types.Config) (*types.SplitResult, error) {
 	return s.executeWorkflow(sourceBranch, cfg)
 }
 
 // getSmartConfiguration gets configuration with file count awareness
 func (s *Splitter) getSmartConfiguration(sourceBranch string) (*types.Config, error) {
-	// Quick analysis for recommendations
-	quickChanges, err := s.gitClient.GetChanges(sourceBranch, "main")
+	// Try quick analysis for recommendations (use default target branch for analysis)
+	defaultTarget := config.ConfigDefaults.TargetBranch
+	quickChanges, err := s.gitClient.GetChanges(sourceBranch, defaultTarget)
 	if err != nil {
 		fmt.Println("⚠️  Quick analysis failed, using basic configuration...")
 		return config.GetFromUser()

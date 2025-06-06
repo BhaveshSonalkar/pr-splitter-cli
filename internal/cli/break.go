@@ -3,10 +3,21 @@ package cli
 import (
 	"fmt"
 
+	"pr-splitter-cli/internal/config"
 	"pr-splitter-cli/internal/splitter"
 	"pr-splitter-cli/internal/types"
 
 	"github.com/spf13/cobra"
+)
+
+// Command flags
+var (
+	targetBranch   string
+	branchPrefix   string
+	maxSize        int
+	maxDepth       int
+	configFile     string
+	nonInteractive bool
 )
 
 // breakCmd represents the break command
@@ -37,9 +48,15 @@ func runBreakCommand(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🚀 Breaking PR from branch: %s\n", sourceBranch)
 	fmt.Println()
 
-	// Create splitter and run the process
+	// Create configuration from flags or interactive prompts
+	cfg, err := createConfiguration()
+	if err != nil {
+		return fmt.Errorf("failed to create configuration: %w", err)
+	}
+
+	// Create splitter and run the process with configuration
 	s := splitter.New()
-	result, err := s.Split(sourceBranch)
+	result, err := s.SplitWithConfig(sourceBranch, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to split PR: %w", err)
 	}
@@ -48,6 +65,66 @@ func runBreakCommand(cmd *cobra.Command, args []string) error {
 	displayBreakResults(result)
 
 	return nil
+}
+
+// createConfiguration creates config from flags or interactive prompts
+func createConfiguration() (*types.Config, error) {
+	// If config file is specified, try to load it first
+	if configFile != "" {
+		cfg, err := config.LoadFromFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config file: %w", err)
+		}
+		// Override with any explicit flags
+		overrideConfigFromFlags(cfg)
+		return cfg, nil
+	}
+
+	// Check if any flags were provided (non-interactive mode)
+	if hasExplicitFlags() {
+		return createConfigFromFlags(), nil
+	}
+
+	// No flags provided, use interactive mode
+	return config.GetFromUser()
+}
+
+// hasExplicitFlags checks if any configuration flags were explicitly set
+func hasExplicitFlags() bool {
+	return targetBranch != "" || branchPrefix != "" || maxSize > 0 || maxDepth > 0 || nonInteractive
+}
+
+// createConfigFromFlags creates configuration from command-line flags
+func createConfigFromFlags() *types.Config {
+	cfg := &types.Config{
+		MaxFilesPerPartition: config.ConfigDefaults.MaxFilesPerPartition,
+		MaxPartitions:        config.ConfigDefaults.MaxPartitions,
+		BranchPrefix:         config.ConfigDefaults.BranchPrefix,
+		Strategy:             config.ConfigDefaults.Strategy,
+		TargetBranch:         config.ConfigDefaults.TargetBranch,
+	}
+
+	// Override with provided flags
+	overrideConfigFromFlags(cfg)
+
+	return cfg
+}
+
+// overrideConfigFromFlags applies command-line flags to configuration
+func overrideConfigFromFlags(cfg *types.Config) {
+	if targetBranch != "" {
+		cfg.TargetBranch = targetBranch
+	}
+	if branchPrefix != "" {
+		cfg.BranchPrefix = branchPrefix
+	}
+	if maxSize > 0 {
+		cfg.MaxFilesPerPartition = maxSize
+	}
+	// Calculate max partitions based on max depth if provided
+	if maxDepth > 0 {
+		cfg.MaxPartitions = maxDepth * 2 // Simple heuristic
+	}
 }
 
 // displayBreakResults shows the final results to the user
@@ -71,4 +148,14 @@ func displayBreakResults(result *types.SplitResult) {
 		}
 		fmt.Printf("3. Use 'pr-split rollback %s' to cleanup when done\n", result.Config.BranchPrefix)
 	}
+}
+
+func init() {
+	// Add flags to the break command
+	breakCmd.Flags().StringVarP(&targetBranch, "target", "t", "", "Target branch (default \"main\")")
+	breakCmd.Flags().StringVarP(&branchPrefix, "prefix", "p", "", "Branch prefix (default \"pr-split\")")
+	breakCmd.Flags().IntVarP(&maxSize, "max-size", "s", 0, "Maximum files per partition (default 15)")
+	breakCmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum dependency depth (default 10)")
+	breakCmd.Flags().StringVarP(&configFile, "config", "c", "", "Config file path")
+	breakCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Run without prompts using defaults")
 }

@@ -11,6 +11,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Command flags for rollback
+var (
+	dryRun bool
+)
+
 var rollbackCmd = &cobra.Command{
 	Use:   "rollback [branch-prefix]",
 	Short: "Rollback and cleanup branches created by pr-splitter",
@@ -18,13 +23,14 @@ var rollbackCmd = &cobra.Command{
 
 This command will:
 1. List all branches matching the prefix pattern
-2. Ask for confirmation 
+2. Ask for confirmation (unless --dry-run)
 3. Delete both local and remote branches
 4. Return to the original branch
 
 Examples:
   pr-split rollback pr-split            Cleanup all branches starting with 'pr-split'
-  pr-split rollback feature-split-      Cleanup branches with custom prefix`,
+  pr-split rollback feature-split-      Cleanup branches with custom prefix
+  pr-split rollback pr-split --dry-run  Preview what would be deleted`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRollback,
 }
@@ -32,7 +38,11 @@ Examples:
 func runRollback(cmd *cobra.Command, args []string) error {
 	branchPrefix := args[0]
 
-	fmt.Printf("🔍 Searching for branches with prefix: %s\n", branchPrefix)
+	if dryRun {
+		fmt.Printf("🔍 DRY RUN: Searching for branches with prefix: %s\n", branchPrefix)
+	} else {
+		fmt.Printf("🔍 Searching for branches with prefix: %s\n", branchPrefix)
+	}
 	fmt.Println()
 
 	// Initialize git client
@@ -85,6 +95,13 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// For dry run, just show what would be deleted
+	if dryRun {
+		fmt.Printf("🔍 DRY RUN: Would delete %d local and %d remote branches\n", len(localBranches), len(remoteBranches))
+		fmt.Println("Run without --dry-run to actually delete these branches")
+		return nil
+	}
+
 	// Ask for confirmation
 	if !promptForConfirmation(fmt.Sprintf("Delete %d local and %d remote branches?", len(localBranches), len(remoteBranches))) {
 		fmt.Println("❌ Rollback cancelled by user")
@@ -92,9 +109,14 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	}
 
 	// Perform rollback
+	return performRollback(gitClient, localBranches, remoteBranches, originalBranch)
+}
+
+// performRollback executes the actual branch deletion
+func performRollback(gitClient *git.Client, localBranches, remoteBranches []string, originalBranch string) error {
 	fmt.Printf("🔄 Starting rollback...\n")
 
-	// Checkout to original branch (or main/master) before deleting
+	// Checkout to original branch to safely delete other branches
 	safetyBranch := originalBranch
 	if containsString(localBranches, originalBranch) {
 		// Current branch will be deleted, checkout to main/master
@@ -166,7 +188,6 @@ func findRemoteBranchesWithPrefix(gitClient *git.Client, prefix string) ([]strin
 	var matching []string
 	for _, branch := range branches {
 		// Remove origin/ prefix for consistency (assumes origin remote)
-		// TODO: Detect actual remote name dynamically
 		cleanBranch := strings.TrimPrefix(branch, "origin/")
 		if strings.HasPrefix(cleanBranch, prefix) {
 			matching = append(matching, cleanBranch)
@@ -209,4 +230,9 @@ func containsString(slice []string, str string) bool {
 		}
 	}
 	return false
+}
+
+func init() {
+	// Add dry-run flag to rollback command
+	rollbackCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview what would be deleted without actually deleting")
 }
