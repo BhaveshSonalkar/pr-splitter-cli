@@ -193,14 +193,18 @@ func (c *Client) parseGitDiff(output, sourceBranch string) ([]types.FileChange, 
 
 		added := parts[0]
 		deleted := parts[1]
-		filePath := parts[2]
+		filePath := strings.Join(parts[2:], " ") // Handle spaces in file names
 
-		// Handle renames (format: "added deleted oldfile newfile")
+		// Handle different rename formats
 		var changeType types.ChangeType
 		var oldPath string
 
-		if len(parts) == 4 {
-			// Rename detected: added deleted oldfile newfile
+		// Check for Git's {oldname => newname} rename format
+		if strings.Contains(filePath, "{") && strings.Contains(filePath, " => ") && strings.Contains(filePath, "}") {
+			changeType = types.ChangeTypeRename
+			oldPath, filePath = c.parseGitRenameFormat(filePath)
+		} else if len(parts) == 4 {
+			// Handle "added deleted oldfile newfile" format
 			changeType = types.ChangeTypeRename
 			oldPath = filePath
 			filePath = parts[3]
@@ -231,7 +235,7 @@ func (c *Client) parseGitDiff(output, sourceBranch string) ([]types.FileChange, 
 			}
 		}
 
-		// Get file content
+		// Get file content with better error handling
 		content, err := c.getFileContent(filePath, sourceBranch, changeType)
 		if err != nil {
 			// For deleted files, content might not be available
@@ -257,6 +261,38 @@ func (c *Client) parseGitDiff(output, sourceBranch string) ([]types.FileChange, 
 	return changes, nil
 }
 
+// parseGitRenameFormat parses Git's {oldname => newname} rename format
+func (c *Client) parseGitRenameFormat(filePath string) (oldPath, newPath string) {
+	// Extract the base path and the rename part
+	// Format: "path/to/{oldname => newname}"
+
+	braceStart := strings.Index(filePath, "{")
+	braceEnd := strings.Index(filePath, "}")
+
+	if braceStart == -1 || braceEnd == -1 {
+		// Fallback if format is unexpected
+		return filePath, filePath
+	}
+
+	basePath := filePath[:braceStart]
+	renameContent := filePath[braceStart+1 : braceEnd]
+
+	// Split on " => "
+	parts := strings.Split(renameContent, " => ")
+	if len(parts) != 2 {
+		// Fallback if format is unexpected
+		return filePath, filePath
+	}
+
+	oldName := strings.TrimSpace(parts[0])
+	newName := strings.TrimSpace(parts[1])
+
+	oldPath = basePath + oldName
+	newPath = basePath + newName
+
+	return oldPath, newPath
+}
+
 // getFileContent retrieves the content of a file from a specific branch
 func (c *Client) getFileContent(filePath, branch string, changeType types.ChangeType) (string, error) {
 	// For deleted files, don't try to get content
@@ -264,12 +300,22 @@ func (c *Client) getFileContent(filePath, branch string, changeType types.Change
 		return "", nil
 	}
 
+	// Additional validation before attempting git show
+	if !c.isValidFilePath(filePath) {
+		return "", fmt.Errorf("invalid file path: %s", filePath)
+	}
+
 	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", branch, filePath))
 	cmd.Dir = c.workingDir
 
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to get file content: %w", err)
+		// Provide more context about the error
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("git show failed for %s: %s (stderr: %s)",
+				filePath, err, string(exitError.Stderr))
+		}
+		return "", fmt.Errorf("git show failed for %s: %w", filePath, err)
 	}
 
 	return string(output), nil
@@ -845,4 +891,55 @@ func (c *Client) GetRemoteBranches() ([]string, error) {
 	}
 
 	return branches, nil
+}
+
+// isValidFilePath checks if a file path is valid
+func (c *Client) isValidFilePath(filePath string) bool {
+	// Check for empty path
+	if filePath == "" {
+		return false
+	}
+
+	// Check for unmatched braces (like the issue we're seeing)
+	openBraces := strings.Count(filePath, "{")
+	closeBraces := strings.Count(filePath, "}")
+	if openBraces != closeBraces {
+		return false
+	}
+
+	// Check for other malformed patterns
+	malformedPatterns := []string{
+		"{",    // Unmatched opening brace
+		"}",    // Unmatched closing brace at start
+		"//",   // Double slashes (usually indicates path issues)
+		"\x00", // Null bytes
+		"\r",   // Carriage returns in path
+		"\n",   // Newlines in path
+	}
+
+	for _, pattern := range malformedPatterns {
+		if strings.Contains(filePath, pattern) && openBraces != closeBraces {
+			return false
+		}
+	}
+
+	// Check for illegal characters on different platforms
+	illegalChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
+	for _, char := range illegalChars {
+		if strings.Contains(filePath, char) {
+			return false
+		}
+	}
+
+	// Check for paths that are too long (reasonable limit)
+	if len(filePath) > 4096 {
+		return false
+	}
+
+	// Check for dangerous path traversal patterns
+	if strings.Contains(filePath, "..") {
+		return false
+	}
+
+	return true
 }
