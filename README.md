@@ -269,66 +269,6 @@ graph TD
     R --> S[Cleanup Complete]
 ```
 
-## 🤝 **Contributing**
-
-We welcome contributions! Here's how to get started:
-
-### **Development Setup**
-
-```bash
-# Clone and setup
-git clone https://github.com/BhaveshSonalkar/pr-splitter-cli.git
-cd pr-splitter-cli
-
-# Install dependencies
-go mod download
-
-# Run tests
-go test ./...
-
-# Build
-go build -o pr-split cmd/pr-split/main.go
-
-# Test locally
-./pr-split --help
-```
-
-### **Contribution Guidelines**
-
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
-3. **Add tests** for new functionality
-4. **Run tests**: `go test ./...`
-5. **Commit changes**: `git commit -m 'Add amazing feature'`
-6. **Push to branch**: `git push origin feature/amazing-feature`  
-7. **Open a Pull Request**
-
-### **Plugin Development**
-
-- Follow the plugin manifest format
-- Include comprehensive error handling
-- Add tests for your analyzer logic
-- Update documentation
-
-## 📄 **License**
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 **Acknowledgments**
-
-- Built with [Cobra](https://github.com/spf13/cobra) for CLI framework
-- Inspired by tools like [git-machete](https://github.com/VirtusLab/git-machete) and [git-town](https://github.com/git-town/git-town)
-- TypeScript AST analysis powered by Node.js built-in parser
-
-## 📞 **Support**
-
-- 🐛 **Bug Reports**: [Open an issue](https://github.com/BhaveshSonalkar/pr-splitter-cli/issues)
-- 💡 **Feature Requests**: [Start a discussion](https://github.com/BhaveshSonalkar/pr-splitter-cli/discussions)
-- 📖 **Documentation**: Check the [docs/](docs/) directory
-- 🔄 **Rollback Help**: See [ROLLBACK.md](ROLLBACK.md)
-
----
-
 **Made with ❤️ for better code reviews and faster development cycles.**
 
 *Transform your large PRs into reviewable, focused changes today!* 
