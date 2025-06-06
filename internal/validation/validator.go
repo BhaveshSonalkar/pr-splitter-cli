@@ -230,7 +230,22 @@ func (v *Validator) validateSizeConstraints(plan *types.PartitionPlan) types.Val
 		}
 
 		if changedFileCount > maxAllowed {
-			warnings = append(warnings, fmt.Sprintf("Partition %d has %d files (limit: %d)", partition.ID, changedFileCount, maxAllowed))
+			// Check if this is a catch-all or final partition (more lenient)
+			isCatchAll := partition.Name == "remaining-files" ||
+				strings.Contains(partition.Description, "Catch-all") ||
+				strings.Contains(partition.Description, "catch-all")
+
+			if isCatchAll {
+				warnings = append(warnings, fmt.Sprintf("Catch-all partition %d has %d files (normal limit: %d)",
+					partition.ID, changedFileCount, maxAllowed))
+			} else if changedFileCount > maxAllowed*2 {
+				// Only fail if dramatically oversized and not a catch-all
+				issues = append(issues, fmt.Sprintf("Partition %d has %d files, exceeding 2x limit (%d)",
+					partition.ID, changedFileCount, maxAllowed*2))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("Partition %d has %d files (limit: %d)",
+					partition.ID, changedFileCount, maxAllowed))
+			}
 		}
 
 		if changedFileCount == 0 {
@@ -240,7 +255,7 @@ func (v *Validator) validateSizeConstraints(plan *types.PartitionPlan) types.Val
 
 	// Determine result
 	status := types.ValidationStatusPass
-	message := fmt.Sprintf("Size validation passed: all partitions within limits")
+	message := fmt.Sprintf("Size validation passed: all partitions within reasonable limits")
 
 	if len(issues) > 0 {
 		status = types.ValidationStatusFail
@@ -248,6 +263,9 @@ func (v *Validator) validateSizeConstraints(plan *types.PartitionPlan) types.Val
 	} else if len(warnings) > 0 {
 		status = types.ValidationStatusWarn
 		message = fmt.Sprintf("Size validation warning: %s", strings.Join(warnings, "; "))
+		if len(warnings) == 1 && strings.Contains(warnings[0], "Catch-all") {
+			message = message + " (This is expected for large file sets)"
+		}
 	}
 
 	details := append(issues, warnings...)

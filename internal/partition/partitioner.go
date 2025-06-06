@@ -290,9 +290,23 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 	// Track processed depths to prevent infinite loops
 	maxDepth := len(workingNodes) // Upper bound on possible depth
 
+	// Calculate if we might exceed partition limits
+	totalFiles := len(workingNodes)
+	maxCapacity := cfg.MaxPartitions * cfg.MaxFilesPerPartition
+	willExceedCapacity := totalFiles > maxCapacity
+
+	if willExceedCapacity {
+		fmt.Printf("⚠️  Warning: %d files may exceed capacity (%d partitions × %d files = %d max)\n",
+			totalFiles, cfg.MaxPartitions, cfg.MaxFilesPerPartition, maxCapacity)
+	}
+
 	// Create partitions starting from lowest dependency depth
-	for depth := 0; len(workingNodes) > 0 && len(partitions) < cfg.MaxPartitions-len(existingPartitions) && depth <= maxDepth; depth++ {
+	for depth := 0; len(workingNodes) > 0 && depth <= maxDepth; depth++ {
 		depthFiles := depthGroups[depth]
+
+		// Handle case where we've reached max partitions but still have files
+		currentPartitionCount := len(existingPartitions) + len(partitions)
+		isLastAllowedPartition := currentPartitionCount >= cfg.MaxPartitions-1
 
 		// If no files at this depth and we've processed all possible depths,
 		// handle remaining files in a final catch-all partition
@@ -319,8 +333,20 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 				continue
 			}
 
+			// For the last allowed partition, be more flexible with size limits
+			var sizeLimit int
+			if isLastAllowedPartition && len(workingNodes) > cfg.MaxFilesPerPartition {
+				// Allow larger partition to accommodate remaining files
+				sizeLimit = len(workingNodes)
+				if sizeLimit > cfg.MaxFilesPerPartition*2 {
+					sizeLimit = cfg.MaxFilesPerPartition * 2 // Cap at 2x normal size
+				}
+			} else {
+				sizeLimit = cfg.MaxFilesPerPartition
+			}
+
 			// Check partition size limit
-			if fileCount >= cfg.MaxFilesPerPartition {
+			if fileCount >= sizeLimit {
 				break
 			}
 
@@ -353,10 +379,50 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 
 			partition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
 			partitions = append(partitions, partition)
+
+			// If this was an oversized partition, warn the user
+			if fileCount > cfg.MaxFilesPerPartition {
+				fmt.Printf("📦 Created oversized partition %d with %d files (normal limit: %d)\n",
+					partition.ID, fileCount, cfg.MaxFilesPerPartition)
+			}
+		}
+
+		// If we've reached max partitions and still have files, create a final catch-all partition
+		if currentPartitionCount >= cfg.MaxPartitions-1 && len(workingNodes) > 0 {
+			remainingFiles := make([]types.FileChange, 0)
+			for _, node := range workingNodes {
+				if !allocated[node] {
+					file := p.getFileByPath(files, node)
+					if file != nil {
+						remainingFiles = append(remainingFiles, *file)
+						allocated[node] = true
+					}
+				}
+			}
+
+			if len(remainingFiles) > 0 {
+				catchAllPartition := types.Partition{
+					ID:           len(existingPartitions) + len(partitions) + 1,
+					Name:         "remaining-files",
+					Description:  fmt.Sprintf("Catch-all partition (%d files)", len(remainingFiles)),
+					Files:        remainingFiles,
+					Dependencies: p.calculatePartitionDependencies(p.getFilePaths(remainingFiles), append(existingPartitions, partitions...), graph),
+				}
+
+				catchAllPartition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, catchAllPartition.ID, catchAllPartition.Name)
+				partitions = append(partitions, catchAllPartition)
+
+				fmt.Printf("📦 Created catch-all partition %d with %d files\n",
+					catchAllPartition.ID, len(remainingFiles))
+
+				// Clear working nodes since we've allocated everything
+				workingNodes = []string{}
+			}
+			break
 		}
 	}
 
-	// Ensure all files are allocated - if not, it's an error condition
+	// Final check - if we still have unallocated files, it's an error
 	if len(workingNodes) > 0 {
 		var unallocatedFiles []string
 		for _, node := range workingNodes {

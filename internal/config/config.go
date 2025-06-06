@@ -22,9 +22,108 @@ func GetFromUser() (*types.Config, error) {
 	}
 
 	// Get max partitions
-	maxPartitions, err := promptForInt("Max total partitions?", 8, 1, 20)
+	maxPartitions, err := promptForInt("Max total partitions?", 8, 1, 50)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get max partitions: %w", err)
+	}
+
+	// Calculate and show capacity
+	totalCapacity := maxFiles * maxPartitions
+	fmt.Printf("💡 Total capacity: %d files (%d partitions × %d files)\n",
+		totalCapacity, maxPartitions, maxFiles)
+
+	// Get branch prefix
+	branchPrefix, err := promptForString("Branch prefix?", "pr-split")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get branch prefix: %w", err)
+	}
+
+	// Get strategy (for now, just default to dependency-first)
+	strategy := "dependency-first"
+	fmt.Printf("Strategy: %s (default)\n", strategy)
+
+	// Get target branch
+	targetBranch, err := promptForString("Target branch?", "main")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target branch: %w", err)
+	}
+
+	// Create config and validate
+	config := &types.Config{
+		MaxFilesPerPartition: maxFiles,
+		MaxPartitions:        maxPartitions,
+		BranchPrefix:         branchPrefix,
+		Strategy:             strategy,
+		TargetBranch:         targetBranch,
+	}
+
+	// Validate configuration consistency
+	if err := validateConfig(config); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("✅ Configuration complete!")
+	fmt.Println()
+
+	return config, nil
+}
+
+// GetFromUserWithCapacityCheck prompts user with file count awareness
+func GetFromUserWithCapacityCheck(estimatedFileCount int) (*types.Config, error) {
+	fmt.Println("🔧 Configuration Setup:")
+	fmt.Printf("📊 Estimated files to partition: %d\n", estimatedFileCount)
+	fmt.Println()
+
+	// Calculate recommended values
+	recommendedPartitions := (estimatedFileCount / 15) + 1
+	if recommendedPartitions < 8 {
+		recommendedPartitions = 8
+	}
+	if recommendedPartitions > 50 {
+		recommendedPartitions = 50
+	}
+
+	recommendedFilesPerPartition := 15
+	if estimatedFileCount > 500 {
+		recommendedFilesPerPartition = 25
+	}
+
+	fmt.Printf("💡 Recommendations for %d files:\n", estimatedFileCount)
+	fmt.Printf("   • Max partitions: %d\n", recommendedPartitions)
+	fmt.Printf("   • Max files per partition: %d\n", recommendedFilesPerPartition)
+	fmt.Printf("   • Total capacity: %d files\n", recommendedPartitions*recommendedFilesPerPartition)
+	fmt.Println()
+
+	// Get max files per partition with recommendation
+	maxFiles, err := promptForInt(
+		fmt.Sprintf("Max files per partition? (recommended: %d)", recommendedFilesPerPartition),
+		recommendedFilesPerPartition, 1, 100)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get max files per partition: %w", err)
+	}
+
+	// Get max partitions with recommendation
+	maxPartitions, err := promptForInt(
+		fmt.Sprintf("Max total partitions? (recommended: %d)", recommendedPartitions),
+		recommendedPartitions, 1, 50)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get max partitions: %w", err)
+	}
+
+	// Calculate and show capacity with warnings
+	totalCapacity := maxFiles * maxPartitions
+	fmt.Printf("💡 Selected capacity: %d files (%d partitions × %d files)\n",
+		totalCapacity, maxPartitions, maxFiles)
+
+	if totalCapacity < estimatedFileCount {
+		fmt.Printf("⚠️  Warning: Selected capacity (%d) is less than estimated files (%d)\n",
+			totalCapacity, estimatedFileCount)
+		fmt.Println("   The tool will create catch-all partitions or larger partitions as needed.")
+	} else if totalCapacity > estimatedFileCount*2 {
+		fmt.Printf("💡 Info: Selected capacity (%d) is much larger than needed (%d)\n",
+			totalCapacity, estimatedFileCount)
+		fmt.Println("   You may end up with many small partitions.")
 	}
 
 	// Get branch prefix
