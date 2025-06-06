@@ -1,10 +1,7 @@
 package splitter
 
 import (
-	"bufio"
 	"fmt"
-	"os"
-	"strings"
 
 	"pr-splitter-cli/internal/config"
 	"pr-splitter-cli/internal/git"
@@ -34,91 +31,123 @@ func New() *Splitter {
 
 // Split performs the complete PR splitting process
 func (s *Splitter) Split(sourceBranch string) (*types.SplitResult, error) {
-	// Step 1: Quick analysis to get file count for configuration
-	fmt.Println("🔍 Quick analysis for configuration recommendations...")
-	targetBranch := "main" // Default for initial analysis
-	quickChanges, err := s.gitClient.GetChanges(sourceBranch, targetBranch)
-	if err != nil {
-		// Fall back to basic configuration if quick analysis fails
-		fmt.Println("⚠️  Quick analysis failed, using basic configuration...")
-		cfg, err := config.GetFromUser()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get configuration: %w", err)
-		}
-		return s.splitWithConfig(sourceBranch, cfg)
-	}
-
-	// Count changed files for capacity recommendations
-	changedFileCount := 0
-	for _, change := range quickChanges {
-		if change.IsChanged {
-			changedFileCount++
-		}
-	}
-
-	// Step 2: Get configuration with capacity awareness
-	fmt.Println("🔧 Getting configuration...")
-	cfg, err := config.GetFromUserWithCapacityCheck(changedFileCount)
+	// Step 1: Get configuration with smart recommendations
+	fmt.Println("🔍 Analyzing repository for configuration recommendations...")
+	cfg, err := s.getSmartConfiguration(sourceBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
 
-	return s.splitWithConfig(sourceBranch, cfg)
+	return s.executeWorkflow(sourceBranch, cfg)
 }
 
-// splitWithConfig performs the splitting with a given configuration
-func (s *Splitter) splitWithConfig(sourceBranch string, cfg *types.Config) (*types.SplitResult, error) {
-	// Step 1: Analyze git changes with the final target branch
-	fmt.Printf("🔍 Analyzing git changes from %s to %s...\n", sourceBranch, cfg.TargetBranch)
-	changes, err := s.gitClient.GetChanges(sourceBranch, cfg.TargetBranch)
+// getSmartConfiguration gets configuration with file count awareness
+func (s *Splitter) getSmartConfiguration(sourceBranch string) (*types.Config, error) {
+	// Quick analysis for recommendations
+	quickChanges, err := s.gitClient.GetChanges(sourceBranch, "main")
 	if err != nil {
-		return nil, fmt.Errorf("failed to analyze git changes: %w", err)
+		fmt.Println("⚠️  Quick analysis failed, using basic configuration...")
+		return config.GetFromUser()
 	}
 
-	if len(changes) == 0 {
-		return nil, fmt.Errorf("no changes found between %s and %s", sourceBranch, cfg.TargetBranch)
+	changedFileCount := s.countChangedFiles(quickChanges)
+	return config.GetFromUserWithCapacityCheck(changedFileCount)
+}
+
+// executeWorkflow runs the main splitting workflow
+func (s *Splitter) executeWorkflow(sourceBranch string, cfg *types.Config) (*types.SplitResult, error) {
+	// Step 1: Analyze changes
+	changes, err := s.analyzeChanges(sourceBranch, cfg.TargetBranch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to analyze changes: %w", err)
 	}
 
-	fmt.Printf("📊 Found %d changed files\n", len(changes))
-
-	// Step 2: Analyze dependencies with plugins
-	fmt.Println("🧠 Analyzing dependencies with plugins...")
-	dependencies, err := s.pluginManager.AnalyzeDependencies(changes)
+	// Step 2: Analyze dependencies
+	dependencies, err := s.analyzeDependencies(changes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to analyze dependencies: %w", err)
 	}
 
-	fmt.Printf("🔗 Found %d dependencies\n", len(dependencies))
-
 	// Step 3: Create partition plan
-	fmt.Println("📦 Creating partition plan...")
-	plan, err := s.partitioner.CreatePlan(changes, dependencies, cfg)
+	plan, err := s.createPartitionPlan(changes, dependencies, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create partition plan: %w", err)
 	}
 
-	fmt.Printf("📋 Created %d partitions\n", len(plan.Partitions))
-
-	// Show exhaustiveness summary
-	s.displayExhaustivenessSummary(changes, plan)
-
-	// Display partition summary for user review
-	err = s.displayPartitionSummary(plan)
-	if err != nil {
-		return nil, fmt.Errorf("failed to display partition summary: %w", err)
+	// Step 4: Get user approval
+	if err := s.getApprovalForPlan(plan); err != nil {
+		return nil, err
 	}
 
-	// Ask user for approval
+	// Step 5: Validate and execute
+	return s.validateAndExecute(plan, changes, cfg, sourceBranch)
+}
+
+// analyzeChanges gets git changes with validation
+func (s *Splitter) analyzeChanges(sourceBranch, targetBranch string) ([]types.FileChange, error) {
+	fmt.Printf("🔍 Analyzing git changes from %s to %s...\n", sourceBranch, targetBranch)
+
+	changes, err := s.gitClient.GetChanges(sourceBranch, targetBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(changes) == 0 {
+		return nil, fmt.Errorf("no changes found between %s and %s", sourceBranch, targetBranch)
+	}
+
+	fmt.Printf("📊 Found %d changed files\n", s.countChangedFiles(changes))
+	return changes, nil
+}
+
+// analyzeDependencies runs plugin analysis on files
+func (s *Splitter) analyzeDependencies(changes []types.FileChange) ([]types.Dependency, error) {
+	fmt.Println("🧠 Analyzing dependencies with plugins...")
+
+	dependencies, err := s.pluginManager.AnalyzeDependencies(changes)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("🔗 Found %d dependencies\n", len(dependencies))
+	return dependencies, nil
+}
+
+// createPartitionPlan creates the partitioning plan
+func (s *Splitter) createPartitionPlan(changes []types.FileChange, dependencies []types.Dependency, cfg *types.Config) (*types.PartitionPlan, error) {
+	fmt.Println("📦 Creating partition plan...")
+
+	plan, err := s.partitioner.CreatePlan(changes, dependencies, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("📋 Created %d partitions\n", len(plan.Partitions))
+	s.displayPartitionSummary(plan)
+	s.displayExhaustivenessSummary(changes, plan)
+
+	return plan, nil
+}
+
+// getApprovalForPlan displays plan and gets user approval
+func (s *Splitter) getApprovalForPlan(plan *types.PartitionPlan) error {
+	s.displayDetailedPlan(plan)
+
 	approved, err := s.promptForApproval()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user approval: %w", err)
+		return fmt.Errorf("failed to get user approval: %w", err)
 	}
 
 	if !approved {
-		return nil, fmt.Errorf("user cancelled the operation")
+		return fmt.Errorf("user cancelled the operation")
 	}
 
-	// Step 4: Pre-execution validation
+	return nil
+}
+
+// validateAndExecute validates the plan and creates branches
+func (s *Splitter) validateAndExecute(plan *types.PartitionPlan, changes []types.FileChange, cfg *types.Config, sourceBranch string) (*types.SplitResult, error) {
+	// Pre-validation
 	fmt.Println("✅ Validating partition plan...")
 	preValidation, err := s.validator.ValidatePlan(plan, changes)
 	if err != nil {
@@ -130,18 +159,14 @@ func (s *Splitter) splitWithConfig(sourceBranch string, cfg *types.Config) (*typ
 		return nil, fmt.Errorf("partition plan validation failed")
 	}
 
-	fmt.Println("✅ Plan validation passed")
-
-	// Step 5: Create branches
+	// Create branches
 	fmt.Println("🌿 Creating branches...")
 	branches, err := s.gitClient.CreateBranches(plan, cfg, sourceBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create branches: %w", err)
 	}
 
-	fmt.Printf("✅ Created %d branches\n", len(branches))
-
-	// Step 6: Post-creation validation
+	// Post-validation
 	fmt.Println("🔍 Post-creation validation...")
 	postValidation, err := s.validator.ValidateBranches(branches, changes, sourceBranch, cfg.TargetBranch)
 	if err != nil {
@@ -153,9 +178,7 @@ func (s *Splitter) splitWithConfig(sourceBranch string, cfg *types.Config) (*typ
 		return nil, fmt.Errorf("branch validation failed")
 	}
 
-	fmt.Println("✅ Post-creation validation passed")
-
-	// Step 7: Build and return result
+	// Build result
 	result := &types.SplitResult{
 		SourceBranch:      sourceBranch,
 		TargetBranch:      cfg.TargetBranch,
@@ -165,22 +188,36 @@ func (s *Splitter) splitWithConfig(sourceBranch string, cfg *types.Config) (*typ
 		Config:            *cfg,
 	}
 
-	// Step 8: Display success summary
 	s.displaySuccessSummary(result, plan)
-
 	return result, nil
 }
 
-// displayPartitionSummary shows the partition plan to the user
-func (s *Splitter) displayPartitionSummary(plan *types.PartitionPlan) error {
+// Utility and display methods
+
+func (s *Splitter) countChangedFiles(changes []types.FileChange) int {
+	count := 0
+	for _, change := range changes {
+		if change.IsChanged {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Splitter) displayPartitionSummary(plan *types.PartitionPlan) {
+	fmt.Printf("📊 Partition Summary: %d partitions covering %d files\n",
+		len(plan.Partitions), plan.Metadata.TotalFiles)
+}
+
+func (s *Splitter) displayDetailedPlan(plan *types.PartitionPlan) {
 	fmt.Println()
-	fmt.Println("📦 Partition Plan:")
+	fmt.Println("📦 Detailed Partition Plan:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	for i, partition := range plan.Partitions {
 		fmt.Printf("Partition %d: %s (%d files)\n", i+1, partition.Description, len(partition.Files))
 
-		// Show first few files as preview
+		// Show preview of files
 		maxShow := 3
 		for j, file := range partition.Files {
 			if j >= maxShow {
@@ -196,40 +233,48 @@ func (s *Splitter) displayPartitionSummary(plan *types.PartitionPlan) error {
 		} else {
 			fmt.Printf("  Dependencies: None (base partition)\n")
 		}
-
 		fmt.Println()
 	}
 
 	fmt.Printf("Total: %d files across %d partitions\n", plan.Metadata.TotalFiles, plan.Metadata.TotalPartitions)
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
-
-	return nil
 }
 
-// promptForApproval asks user to approve the partition plan
+func (s *Splitter) displayExhaustivenessSummary(changes []types.FileChange, plan *types.PartitionPlan) {
+	totalFiles := s.countChangedFiles(changes)
+	partitionFileCount := 0
+
+	for _, partition := range plan.Partitions {
+		partitionFileCount += len(partition.Files)
+	}
+
+	fmt.Println("📊 Coverage Summary:")
+	fmt.Printf("   • Total changed files: %d\n", totalFiles)
+	fmt.Printf("   • Files in partitions: %d\n", partitionFileCount)
+
+	if partitionFileCount == totalFiles {
+		fmt.Println("   ✅ All files included (100% coverage)")
+	} else {
+		fmt.Printf("   ⚠️  Coverage gap: %d files\n", totalFiles-partitionFileCount)
+	}
+	fmt.Println()
+}
+
 func (s *Splitter) promptForApproval() (bool, error) {
 	fmt.Print("Proceed with this partition plan? [Y/n]: ")
 
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return false, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	input = strings.TrimSpace(strings.ToLower(input))
+	var input string
+	fmt.Scanln(&input)
 
 	switch input {
-	case "n", "no":
+	case "n", "no", "N", "No":
 		return false, nil
-	case "y", "yes", "":
-		return true, nil
 	default:
-		return true, nil // Default to yes for any other input
+		return true, nil
 	}
 }
 
-// displayValidationResults shows validation results to the user
 func (s *Splitter) displayValidationResults(results []types.ValidationResult) {
 	fmt.Println("\n❌ Validation Results:")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -244,14 +289,11 @@ func (s *Splitter) displayValidationResults(results []types.ValidationResult) {
 		case types.ValidationStatusFail:
 			status = "❌ FAIL"
 		}
-
 		fmt.Printf("%s %s: %s\n", status, result.Type, result.Message)
 	}
-
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
-// displaySuccessSummary shows a success summary to the user
 func (s *Splitter) displaySuccessSummary(result *types.SplitResult, plan *types.PartitionPlan) {
 	fmt.Println()
 	fmt.Println("🎉 Success Summary:")
@@ -267,50 +309,5 @@ func (s *Splitter) displaySuccessSummary(result *types.SplitResult, plan *types.
 	fmt.Println("2. Create PRs for each branch in dependency order")
 	fmt.Println("3. Merge branches sequentially")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
-}
-
-// displayExhaustivenessSummary shows a summary of analyzed vs unanalyzed files
-func (s *Splitter) displayExhaustivenessSummary(changes []types.FileChange, plan *types.PartitionPlan) {
-	// Count files in partitions by type
-	partitionFileCount := 0
-	unanalyzedPartitionCount := 0
-	dependencyPartitionCount := 0
-
-	for _, partition := range plan.Partitions {
-		partitionFileCount += len(partition.Files)
-
-		// Classify partition types
-		if strings.Contains(partition.Name, "unanalyzed") ||
-			strings.Contains(partition.Name, "documentation") ||
-			strings.Contains(partition.Name, "configuration") ||
-			strings.Contains(partition.Name, "assets") ||
-			strings.Contains(partition.Name, "miscellaneous") ||
-			strings.Contains(partition.Name, "dir-") {
-			unanalyzedPartitionCount++
-		} else {
-			dependencyPartitionCount++
-		}
-	}
-
-	totalFiles := 0
-	for _, change := range changes {
-		if change.IsChanged {
-			totalFiles++
-		}
-	}
-
-	fmt.Println("📊 Exhaustiveness Summary:")
-	fmt.Printf("   • Total changed files: %d\n", totalFiles)
-	fmt.Printf("   • Files in partitions: %d\n", partitionFileCount)
-	fmt.Printf("   • Dependency-based partitions: %d\n", dependencyPartitionCount)
-	fmt.Printf("   • Unanalyzed file partitions: %d\n", unanalyzedPartitionCount)
-
-	if partitionFileCount == totalFiles {
-		fmt.Println("   ✅ All files included (100% exhaustiveness)")
-	} else {
-		fmt.Printf("   ⚠️  Missing files: %d\n", totalFiles-partitionFileCount)
-	}
-
 	fmt.Println()
 }

@@ -3,7 +3,6 @@ package partition
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"pr-splitter-cli/internal/config"
@@ -12,8 +11,7 @@ import (
 
 // Partitioner creates logical partitions based on dependencies
 type Partitioner struct {
-	// Internal state for partitioning
-	depthCache map[string]int // Cache for dependency depth calculations
+	depthCache map[string]int
 }
 
 // NewPartitioner creates a new partitioner instance
@@ -23,73 +21,40 @@ func NewPartitioner() *Partitioner {
 
 // CreatePlan creates a partition plan based on file changes and dependencies
 func (p *Partitioner) CreatePlan(changes []types.FileChange, dependencies []types.Dependency, cfg *types.Config) (*types.PartitionPlan, error) {
-	// Initialize clean cache for this planning session
 	p.depthCache = make(map[string]int)
 
-	// Filter to only changed files for partitioning
 	changedFiles := p.filterChangedFiles(changes)
-
 	if len(changedFiles) == 0 {
 		return nil, fmt.Errorf("no changed files to partition")
 	}
 
 	fmt.Printf("📊 Partitioning %d changed files with %d dependencies\n", len(changedFiles), len(dependencies))
 
-	// Build dependency graph
 	graph, err := p.buildDependencyGraph(changedFiles, dependencies)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build dependency graph: %w", err)
 	}
 
-	// Check for files not covered by dependency analysis (exhaustiveness check)
-	analyzedFiles := make(map[string]bool)
-	for _, node := range graph.Nodes {
-		analyzedFiles[node] = true
-	}
-
-	var unanalyzedFiles []types.FileChange
-	for _, file := range changedFiles {
-		if !analyzedFiles[file.Path] {
-			unanalyzedFiles = append(unanalyzedFiles, file)
-		}
-	}
-
-	if len(unanalyzedFiles) > 0 {
-		fmt.Printf("📋 Found %d files not covered by dependency analysis (will be included separately)\n", len(unanalyzedFiles))
-		// Add these files to the graph as isolated nodes
-		for _, file := range unanalyzedFiles {
-			graph.Nodes = append(graph.Nodes, file.Path)
-			graph.InDegree[file.Path] = 0
-			graph.OutDegree[file.Path] = 0
-		}
-	}
-
-	// Find strongly connected components (circular dependencies)
-	sccs, err := p.findStronglyConnectedComponents(graph)
+	sccs, err := p.findCircularDependencies(graph)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find SCCs: %w", err)
+		return nil, fmt.Errorf("failed to find circular dependencies: %w", err)
 	}
 
-	// Handle oversized SCCs with user prompts
-	approvedSCCs, err := p.handleOversizedSCCs(sccs, cfg.MaxFilesPerPartition)
+	approvedSCCs, err := p.handleOversizedCircularGroups(sccs, cfg.MaxFilesPerPartition)
 	if err != nil {
-		return nil, fmt.Errorf("failed to handle oversized SCCs: %w", err)
+		return nil, fmt.Errorf("failed to handle oversized circular groups: %w", err)
 	}
 
-	// Create partitions using dependency-first strategy
-	partitions, err := p.createPartitions(changedFiles, graph, approvedSCCs, cfg)
+	partitions, err := p.createAllPartitions(changedFiles, graph, approvedSCCs, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create partitions: %w", err)
 	}
 
-	// Final exhaustiveness check - ensure ALL changed files are allocated
-	err = p.validateExhaustiveness(changedFiles, partitions)
-	if err != nil {
+	if err := p.validateExhaustiveness(changedFiles, partitions); err != nil {
 		return nil, fmt.Errorf("exhaustiveness validation failed: %w", err)
 	}
 
-	// Build partition plan
-	plan := &types.PartitionPlan{
+	return &types.PartitionPlan{
 		Partitions: partitions,
 		Metadata: types.PlanMetadata{
 			TotalFiles:           len(changedFiles),
@@ -98,49 +63,46 @@ func (p *Partitioner) CreatePlan(changes []types.FileChange, dependencies []type
 			Strategy:             cfg.Strategy,
 			CreatedAt:            time.Now(),
 		},
-	}
-
-	return plan, nil
+	}, nil
 }
 
 // filterChangedFiles returns only files that were actually changed
 func (p *Partitioner) filterChangedFiles(changes []types.FileChange) []types.FileChange {
 	var changedFiles []types.FileChange
-
 	for _, change := range changes {
 		if change.IsChanged {
 			changedFiles = append(changedFiles, change)
 		}
 	}
-
 	return changedFiles
 }
 
 // buildDependencyGraph creates a dependency graph from files and dependencies
 func (p *Partitioner) buildDependencyGraph(files []types.FileChange, dependencies []types.Dependency) (*types.DependencyGraph, error) {
+	nodeSet := make(map[string]bool)
+	for _, file := range files {
+		nodeSet[file.Path] = true
+	}
+
 	graph := &types.DependencyGraph{
-		Nodes:     make([]string, 0),
-		Edges:     dependencies,
+		Nodes:     make([]string, 0, len(files)),
+		Edges:     make([]types.Dependency, 0),
 		Adjacency: make(map[string][]string),
 		InDegree:  make(map[string]int),
 		OutDegree: make(map[string]int),
 	}
 
-	// Add all files as nodes
-	nodeSet := make(map[string]bool)
-	for _, file := range files {
-		if !nodeSet[file.Path] {
-			graph.Nodes = append(graph.Nodes, file.Path)
-			nodeSet[file.Path] = true
-			graph.InDegree[file.Path] = 0
-			graph.OutDegree[file.Path] = 0
-		}
+	// Initialize nodes
+	for path := range nodeSet {
+		graph.Nodes = append(graph.Nodes, path)
+		graph.InDegree[path] = 0
+		graph.OutDegree[path] = 0
 	}
 
-	// Build adjacency list and degree counts
+	// Add edges between changed files only
 	for _, dep := range dependencies {
-		// Only include dependencies between changed files
 		if nodeSet[dep.From] && nodeSet[dep.To] {
+			graph.Edges = append(graph.Edges, dep)
 			graph.Adjacency[dep.From] = append(graph.Adjacency[dep.From], dep.To)
 			graph.OutDegree[dep.From]++
 			graph.InDegree[dep.To]++
@@ -150,129 +112,103 @@ func (p *Partitioner) buildDependencyGraph(files []types.FileChange, dependencie
 	return graph, nil
 }
 
-// findStronglyConnectedComponents finds circular dependency groups using Tarjan's algorithm
-func (p *Partitioner) findStronglyConnectedComponents(graph *types.DependencyGraph) ([]types.StronglyConnectedComponent, error) {
-	var sccs []types.StronglyConnectedComponent
+// findCircularDependencies finds circular dependency groups using Tarjan's algorithm
+func (p *Partitioner) findCircularDependencies(graph *types.DependencyGraph) ([]types.StronglyConnectedComponent, error) {
+	tarjan := NewTarjanSCC(graph)
+	sccs := tarjan.FindSCCs()
 
-	// Tarjan's SCC algorithm state
-	index := 0
-	stack := make([]string, 0)
-	indices := make(map[string]int)
-	lowlinks := make(map[string]int)
-	onStack := make(map[string]bool)
-
-	// Helper function for Tarjan's algorithm
-	var strongConnect func(string)
-	strongConnect = func(v string) {
-		indices[v] = index
-		lowlinks[v] = index
-		index++
-		stack = append(stack, v)
-		onStack[v] = true
-
-		// Consider successors of v
-		for _, w := range graph.Adjacency[v] {
-			if _, exists := indices[w]; !exists {
-				// Successor w has not been visited; recurse
-				strongConnect(w)
-				if lowlinks[w] < lowlinks[v] {
-					lowlinks[v] = lowlinks[w]
-				}
-			} else if onStack[w] {
-				// Successor w is in stack and hence in current SCC
-				if indices[w] < lowlinks[v] {
-					lowlinks[v] = indices[w]
-				}
-			}
-		}
-
-		// If v is a root node, pop the stack and generate an SCC
-		if lowlinks[v] == indices[v] {
-			var scc []string
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				onStack[w] = false
-				scc = append(scc, w)
-				if w == v {
-					break
-				}
-			}
-
-			// Only add SCCs with more than one node (circular dependencies)
-			if len(scc) > 1 {
-				sccs = append(sccs, types.StronglyConnectedComponent{
-					Files: scc,
-					Size:  len(scc),
-				})
-			}
+	// Filter to only circular dependencies (size > 1)
+	var circularSCCs []types.StronglyConnectedComponent
+	for _, scc := range sccs {
+		if scc.Size > 1 {
+			circularSCCs = append(circularSCCs, scc)
 		}
 	}
 
-	// Run Tarjan's algorithm on all unvisited nodes
-	for _, node := range graph.Nodes {
-		if _, visited := indices[node]; !visited {
-			strongConnect(node)
-		}
-	}
-
-	// Sort SCCs by size (largest first) for better user experience
-	sort.Slice(sccs, func(i, j int) bool {
-		return sccs[i].Size > sccs[j].Size
+	// Sort by size (largest first)
+	sort.Slice(circularSCCs, func(i, j int) bool {
+		return circularSCCs[i].Size > circularSCCs[j].Size
 	})
 
-	if len(sccs) > 0 {
-		fmt.Printf("🔄 Found %d circular dependency groups\n", len(sccs))
-		for i, scc := range sccs {
+	if len(circularSCCs) > 0 {
+		fmt.Printf("🔄 Found %d circular dependency groups\n", len(circularSCCs))
+		for i, scc := range circularSCCs {
 			fmt.Printf("   Group %d: %d files\n", i+1, scc.Size)
 		}
 	}
 
-	return sccs, nil
+	return circularSCCs, nil
 }
 
-// handleOversizedSCCs prompts user for approval of SCCs that exceed size limits
-func (p *Partitioner) handleOversizedSCCs(sccs []types.StronglyConnectedComponent, maxSize int) ([]types.StronglyConnectedComponent, error) {
+// handleOversizedCircularGroups prompts user for approval of large circular groups
+func (p *Partitioner) handleOversizedCircularGroups(sccs []types.StronglyConnectedComponent, maxSize int) ([]types.StronglyConnectedComponent, error) {
 	var approvedSCCs []types.StronglyConnectedComponent
 
 	for _, scc := range sccs {
 		if scc.Size > maxSize {
-			// Prompt user for decision
 			approved, err := config.PromptForSCCDecision(scc.Files, scc.Size, maxSize)
 			if err != nil {
 				return nil, fmt.Errorf("SCC approval failed: %w", err)
 			}
-
-			if approved {
-				approvedSCCs = append(approvedSCCs, scc)
-			} else {
+			if !approved {
 				return nil, fmt.Errorf("user rejected oversized SCC with %d files", scc.Size)
 			}
-		} else {
-			approvedSCCs = append(approvedSCCs, scc)
 		}
+		approvedSCCs = append(approvedSCCs, scc)
 	}
 
 	return approvedSCCs, nil
 }
 
-// createPartitions creates partitions using dependency-first strategy
-func (p *Partitioner) createPartitions(files []types.FileChange, graph *types.DependencyGraph, sccs []types.StronglyConnectedComponent, cfg *types.Config) ([]types.Partition, error) {
+// createAllPartitions creates all partitions using the configured strategy
+func (p *Partitioner) createAllPartitions(files []types.FileChange, graph *types.DependencyGraph, sccs []types.StronglyConnectedComponent, cfg *types.Config) ([]types.Partition, error) {
 	var partitions []types.Partition
-
-	// Track which files are already allocated
 	allocated := make(map[string]bool)
 
-	// First, allocate SCCs as complete groups
+	// First: Create partitions for circular dependency groups
+	partitions = p.createCircularDependencyPartitions(sccs, files, partitions, cfg, allocated)
+
+	// Second: Create dependency-based partitions for remaining files
+	remainingFiles := p.getRemainingFiles(files, allocated)
+	if len(remainingFiles) > 0 {
+		depPartitions, err := p.createDependencyPartitions(remainingFiles, graph, partitions, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create dependency partitions: %w", err)
+		}
+		partitions = append(partitions, depPartitions...)
+
+		// Update allocated files
+		for _, partition := range depPartitions {
+			for _, file := range partition.Files {
+				allocated[file.Path] = true
+			}
+		}
+	}
+
+	// Third: Handle any remaining unallocated files
+	unallocatedFiles := p.getRemainingFiles(files, allocated)
+	if len(unallocatedFiles) > 0 {
+		fmt.Printf("📋 Creating partitions for %d unallocated files...\n", len(unallocatedFiles))
+		remainingPartitions := p.createRemainingFilePartitions(unallocatedFiles, partitions, cfg)
+		partitions = append(partitions, remainingPartitions...)
+	}
+
+	return partitions, nil
+}
+
+// createCircularDependencyPartitions creates partitions for circular dependency groups
+func (p *Partitioner) createCircularDependencyPartitions(sccs []types.StronglyConnectedComponent, files []types.FileChange, existingPartitions []types.Partition, cfg *types.Config, allocated map[string]bool) []types.Partition {
+	var partitions []types.Partition
+
 	for _, scc := range sccs {
 		sccFiles := p.getFilesByPaths(files, scc.Files)
 
 		partition := types.Partition{
-			ID:           len(partitions) + 1,
-			Name:         p.generatePartitionName(sccFiles),
+			ID:           len(existingPartitions) + len(partitions) + 1,
+			Name:         p.generateName(sccFiles),
 			Description:  fmt.Sprintf("Circular dependency group (%d files)", len(sccFiles)),
 			Files:        sccFiles,
-			Dependencies: p.calculatePartitionDependencies(scc.Files, partitions, graph),
+			Dependencies: p.calculateDependencies(scc.Files, append(existingPartitions, partitions...)),
 		}
 
 		partition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
@@ -284,269 +220,157 @@ func (p *Partitioner) createPartitions(files []types.FileChange, graph *types.De
 		}
 	}
 
-	// Then, allocate remaining files using dependency-first strategy
-	remainingFiles := p.getRemainingFiles(files, allocated)
-
-	if len(remainingFiles) > 0 {
-		dependencyPartitions, err := p.createDependencyBasedPartitions(remainingFiles, graph, partitions, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create dependency-based partitions: %w", err)
-		}
-
-		partitions = append(partitions, dependencyPartitions...)
-	}
-
-	// Update allocated files after dependency-based partitioning
-	for _, partition := range partitions {
-		for _, file := range partition.Files {
-			allocated[file.Path] = true
-		}
-	}
-
-	// Final exhaustiveness check: handle any remaining unallocated files
-	unallocatedFiles := p.getRemainingFiles(files, allocated)
-	if len(unallocatedFiles) > 0 {
-		fmt.Printf("📋 Creating partitions for %d unanalyzed files...\n", len(unallocatedFiles))
-
-		unanalyzedPartitions, err := p.createUnanalyzedFilePartitions(unallocatedFiles, partitions, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create unanalyzed file partitions: %w", err)
-		}
-
-		partitions = append(partitions, unanalyzedPartitions...)
-	}
-
-	// Final validation and adjustment
-	partitions = p.balancePartitions(partitions, cfg.MaxFilesPerPartition)
-
-	return partitions, nil
+	return partitions
 }
 
-// createDependencyBasedPartitions creates partitions for non-SCC files based on dependencies
-func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, graph *types.DependencyGraph, existingPartitions []types.Partition, cfg *types.Config) ([]types.Partition, error) {
+// createDependencyPartitions creates partitions based on dependency depth
+func (p *Partitioner) createDependencyPartitions(files []types.FileChange, graph *types.DependencyGraph, existingPartitions []types.Partition, cfg *types.Config) ([]types.Partition, error) {
 	var partitions []types.Partition
 	allocated := make(map[string]bool)
 
-	// Create a working copy of the graph with only unallocated files
-	workingNodes := make([]string, 0)
-	for _, file := range files {
-		workingNodes = append(workingNodes, file.Path)
-	}
+	workingNodes := p.getFilePaths(files)
+	depthGroups := p.groupByDependencyDepth(workingNodes, graph)
 
-	// Group files by their dependency depth (files with no dependencies first)
-	depthGroups := p.groupFilesByDependencyDepth(workingNodes, graph)
-
-	// Track processed depths to prevent infinite loops
-	maxDepth := len(workingNodes) // Upper bound on possible depth
-
-	// Calculate if we might exceed partition limits
 	totalFiles := len(workingNodes)
 	maxCapacity := cfg.MaxPartitions * cfg.MaxFilesPerPartition
 	willExceedCapacity := totalFiles > maxCapacity
 
 	if willExceedCapacity {
-		fmt.Printf("⚠️  Warning: %d files may exceed capacity (%d partitions × %d files = %d max)\n",
-			totalFiles, cfg.MaxPartitions, cfg.MaxFilesPerPartition, maxCapacity)
+		fmt.Printf("⚠️  Warning: %d files may exceed capacity (%d max)\n", totalFiles, maxCapacity)
 	}
 
-	// Create partitions starting from lowest dependency depth
-	for depth := 0; len(workingNodes) > 0 && depth <= maxDepth; depth++ {
+	// Process files by dependency depth
+	for depth := 0; len(workingNodes) > 0 && depth <= len(workingNodes); depth++ {
 		depthFiles := depthGroups[depth]
-
-		// Handle case where we've reached max partitions but still have files
-		currentPartitionCount := len(existingPartitions) + len(partitions)
-		isLastAllowedPartition := currentPartitionCount >= cfg.MaxPartitions-1
-
-		// If no files at this depth and we've processed all possible depths,
-		// handle remaining files in a final catch-all partition
-		if len(depthFiles) == 0 && depth >= maxDepth {
-			// Collect all remaining unallocated files
-			for _, node := range workingNodes {
-				if !allocated[node] {
-					depthFiles = append(depthFiles, node)
-				}
-			}
-		}
-
-		// Skip empty depth levels
 		if len(depthFiles) == 0 {
 			continue
 		}
 
-		// Create partition for this depth level
-		partitionFiles := make([]types.FileChange, 0)
-		fileCount := 0
+		partitionGroup := p.createPartitionForDepth(depthFiles, files, allocated, existingPartitions, partitions, cfg)
+		partitions = append(partitions, partitionGroup...)
 
-		for _, filePath := range depthFiles {
-			if allocated[filePath] {
-				continue
-			}
-
-			// For the last allowed partition, be more flexible with size limits
-			var sizeLimit int
-			if isLastAllowedPartition && len(workingNodes) > cfg.MaxFilesPerPartition {
-				// Allow larger partition to accommodate remaining files
-				sizeLimit = len(workingNodes)
-				if sizeLimit > cfg.MaxFilesPerPartition*2 {
-					sizeLimit = cfg.MaxFilesPerPartition * 2 // Cap at 2x normal size
-				}
-			} else {
-				sizeLimit = cfg.MaxFilesPerPartition
-			}
-
-			// Check partition size limit
-			if fileCount >= sizeLimit {
-				break
-			}
-
-			file := p.getFileByPath(files, filePath)
-			if file != nil {
-				partitionFiles = append(partitionFiles, *file)
-				allocated[filePath] = true
-				fileCount++
-			}
-		}
-
-		// Remove allocated files from working nodes
-		var remainingNodes []string
-		for _, node := range workingNodes {
-			if !allocated[node] {
-				remainingNodes = append(remainingNodes, node)
-			}
-		}
-		workingNodes = remainingNodes
-
-		// Create partition if we have files
-		if len(partitionFiles) > 0 {
-			partition := types.Partition{
-				ID:           len(existingPartitions) + len(partitions) + 1,
-				Name:         p.generatePartitionName(partitionFiles),
-				Description:  p.generatePartitionDescription(partitionFiles),
-				Files:        partitionFiles,
-				Dependencies: p.calculatePartitionDependencies(p.getFilePaths(partitionFiles), append(existingPartitions, partitions...), graph),
-			}
-
-			partition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
-			partitions = append(partitions, partition)
-
-			// If this was an oversized partition, warn the user
-			if fileCount > cfg.MaxFilesPerPartition {
-				fmt.Printf("📦 Created oversized partition %d with %d files (normal limit: %d)\n",
-					partition.ID, fileCount, cfg.MaxFilesPerPartition)
-			}
-		}
-
-		// If we've reached max partitions and still have files, create a final catch-all partition
-		if currentPartitionCount >= cfg.MaxPartitions-1 && len(workingNodes) > 0 {
-			remainingFiles := make([]types.FileChange, 0)
-			for _, node := range workingNodes {
-				if !allocated[node] {
-					file := p.getFileByPath(files, node)
-					if file != nil {
-						remainingFiles = append(remainingFiles, *file)
-						allocated[node] = true
-					}
-				}
-			}
-
-			if len(remainingFiles) > 0 {
-				catchAllPartition := types.Partition{
-					ID:           len(existingPartitions) + len(partitions) + 1,
-					Name:         "remaining-files",
-					Description:  fmt.Sprintf("Catch-all partition (%d files)", len(remainingFiles)),
-					Files:        remainingFiles,
-					Dependencies: p.calculatePartitionDependencies(p.getFilePaths(remainingFiles), append(existingPartitions, partitions...), graph),
-				}
-
-				catchAllPartition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, catchAllPartition.ID, catchAllPartition.Name)
-				partitions = append(partitions, catchAllPartition)
-
-				fmt.Printf("📦 Created catch-all partition %d with %d files\n",
-					catchAllPartition.ID, len(remainingFiles))
-
-				// Clear working nodes since we've allocated everything
-				workingNodes = []string{}
-			}
-			break
-		}
-	}
-
-	// Final check - if we still have unallocated files, it's an error
-	if len(workingNodes) > 0 {
-		var unallocatedFiles []string
-		for _, node := range workingNodes {
-			if !allocated[node] {
-				unallocatedFiles = append(unallocatedFiles, node)
-			}
-		}
-		if len(unallocatedFiles) > 0 {
-			return partitions, fmt.Errorf("failed to allocate %d files to partitions: %v", len(unallocatedFiles), unallocatedFiles)
-		}
+		// Update working nodes
+		workingNodes = p.removeAllocatedNodes(workingNodes, allocated)
 	}
 
 	return partitions, nil
 }
 
-// groupFilesByDependencyDepth groups files by their dependency depth (0 = no dependencies)
-func (p *Partitioner) groupFilesByDependencyDepth(nodes []string, graph *types.DependencyGraph) map[int][]string {
-	groups := make(map[int][]string)
+// createPartitionForDepth creates a partition for files at a specific dependency depth
+func (p *Partitioner) createPartitionForDepth(depthFiles []string, allFiles []types.FileChange, allocated map[string]bool, existingPartitions, currentPartitions []types.Partition, cfg *types.Config) []types.Partition {
+	var partitionFiles []types.FileChange
 
-	for _, node := range nodes {
-		depth := p.calculateDependencyDepth(node, graph, make(map[string]bool))
-		groups[depth] = append(groups[depth], node)
-	}
+	for _, filePath := range depthFiles {
+		if allocated[filePath] {
+			continue
+		}
 
-	return groups
-}
+		if len(partitionFiles) >= cfg.MaxFilesPerPartition {
+			break
+		}
 
-// calculateDependencyDepth calculates the maximum dependency depth for a file
-func (p *Partitioner) calculateDependencyDepth(node string, graph *types.DependencyGraph, visiting map[string]bool) int {
-	// Check for cycles - if we're currently visiting this node, it's a cycle
-	if visiting[node] {
-		return 0 // Return 0 for circular dependencies
-	}
-
-	// Use memoization to avoid recalculating depths
-	if depth, exists := p.depthCache[node]; exists {
-		return depth
-	}
-
-	visiting[node] = true
-	maxDepth := 0
-
-	// Check all dependencies
-	for _, dep := range graph.Adjacency[node] {
-		depth := 1 + p.calculateDependencyDepth(dep, graph, visiting)
-		if depth > maxDepth {
-			maxDepth = depth
+		if file := p.getFileByPath(allFiles, filePath); file != nil {
+			partitionFiles = append(partitionFiles, *file)
+			allocated[filePath] = true
 		}
 	}
 
-	visiting[node] = false // Mark as no longer visiting
-
-	// Cache the result
-	if p.depthCache == nil {
-		p.depthCache = make(map[string]int)
+	if len(partitionFiles) == 0 {
+		return nil
 	}
-	p.depthCache[node] = maxDepth
 
-	return maxDepth
+	partition := types.Partition{
+		ID:           len(existingPartitions) + len(currentPartitions) + 1,
+		Name:         p.generateName(partitionFiles),
+		Description:  p.generateDescription(partitionFiles),
+		Files:        partitionFiles,
+		Dependencies: p.calculateDependencies(p.getFilePaths(partitionFiles), append(existingPartitions, currentPartitions...)),
+	}
+
+	partition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
+	return []types.Partition{partition}
 }
 
-// Helper functions
+// createRemainingFilePartitions creates simple partitions for unallocated files
+func (p *Partitioner) createRemainingFilePartitions(files []types.FileChange, existingPartitions []types.Partition, cfg *types.Config) []types.Partition {
+	fileGrouper := NewFileGrouper()
+	groups := fileGrouper.GroupFiles(files)
+
+	var partitions []types.Partition
+	for groupName, groupFiles := range groups {
+		groupPartitions := p.createSimplePartitions(groupFiles, len(existingPartitions)+len(partitions), cfg, groupName)
+		partitions = append(partitions, groupPartitions...)
+	}
+
+	// Fallback to simple size-based partitioning if no groups
+	if len(partitions) == 0 {
+		partitions = p.createSimplePartitions(files, len(existingPartitions), cfg, "remaining")
+	}
+
+	return partitions
+}
+
+// createSimplePartitions creates basic size-based partitions
+func (p *Partitioner) createSimplePartitions(files []types.FileChange, startID int, cfg *types.Config, baseName string) []types.Partition {
+	var partitions []types.Partition
+
+	for i := 0; i < len(files); i += cfg.MaxFilesPerPartition {
+		end := i + cfg.MaxFilesPerPartition
+		if end > len(files) {
+			end = len(files)
+		}
+
+		partitionFiles := files[i:end]
+		partitionNum := (i / cfg.MaxFilesPerPartition) + 1
+		name := fmt.Sprintf("%s-%d", baseName, partitionNum)
+
+		partition := types.Partition{
+			ID:           startID + len(partitions) + 1,
+			Name:         name,
+			Description:  fmt.Sprintf("%s files (%d files)", baseName, len(partitionFiles)),
+			Files:        partitionFiles,
+			Dependencies: []int{},
+			BranchName:   fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, startID+len(partitions)+1, name),
+		}
+
+		partitions = append(partitions, partition)
+	}
+
+	return partitions
+}
+
+// validateExhaustiveness ensures all changed files are included in partitions
+func (p *Partitioner) validateExhaustiveness(changedFiles []types.FileChange, partitions []types.Partition) error {
+	partitionFiles := make(map[string]bool)
+	for _, partition := range partitions {
+		for _, file := range partition.Files {
+			partitionFiles[file.Path] = true
+		}
+	}
+
+	for _, file := range changedFiles {
+		if !partitionFiles[file.Path] {
+			return fmt.Errorf("file %s not included in any partition", file.Path)
+		}
+	}
+
+	return nil
+}
+
+// Utility methods
 
 func (p *Partitioner) getFilesByPaths(files []types.FileChange, paths []string) []types.FileChange {
-	var result []types.FileChange
-
+	pathSet := make(map[string]bool)
 	for _, path := range paths {
-		for _, file := range files {
-			if file.Path == path {
-				result = append(result, file)
-				break
-			}
-		}
+		pathSet[path] = true
 	}
 
+	var result []types.FileChange
+	for _, file := range files {
+		if pathSet[file.Path] {
+			result = append(result, file)
+		}
+	}
 	return result
 }
 
@@ -561,13 +385,11 @@ func (p *Partitioner) getFileByPath(files []types.FileChange, path string) *type
 
 func (p *Partitioner) getRemainingFiles(files []types.FileChange, allocated map[string]bool) []types.FileChange {
 	var remaining []types.FileChange
-
 	for _, file := range files {
 		if !allocated[file.Path] {
 			remaining = append(remaining, file)
 		}
 	}
-
 	return remaining
 }
 
@@ -579,297 +401,64 @@ func (p *Partitioner) getFilePaths(files []types.FileChange) []string {
 	return paths
 }
 
-func (p *Partitioner) removeFromSlice(slice []string, item string) []string {
-	for i, v := range slice {
-		if v == item {
-			return append(slice[:i], slice[i+1:]...)
+func (p *Partitioner) removeAllocatedNodes(nodes []string, allocated map[string]bool) []string {
+	var remaining []string
+	for _, node := range nodes {
+		if !allocated[node] {
+			remaining = append(remaining, node)
 		}
 	}
-	return slice
+	return remaining
 }
 
-func (p *Partitioner) generatePartitionName(files []types.FileChange) string {
-	if len(files) == 0 {
-		return "empty"
+func (p *Partitioner) groupByDependencyDepth(nodes []string, graph *types.DependencyGraph) map[int][]string {
+	groups := make(map[int][]string)
+	for _, node := range nodes {
+		depth := p.calculateDependencyDepth(node, graph, make(map[string]bool))
+		groups[depth] = append(groups[depth], node)
 	}
-
-	// Try to find a common directory or pattern
-	commonDir := p.findCommonDirectory(files)
-	if commonDir != "" {
-		return strings.ReplaceAll(commonDir, "/", "-")
-	}
-
-	// Fallback to file type or generic name
-	if p.hasFileType(files, ".tsx") || p.hasFileType(files, ".jsx") {
-		return "components"
-	}
-
-	if p.hasFileType(files, ".ts") && p.containsKeyword(files, "utils") {
-		return "utils"
-	}
-
-	return fmt.Sprintf("partition-%d-files", len(files))
-}
-
-func (p *Partitioner) generatePartitionDescription(files []types.FileChange) string {
-	name := p.generatePartitionName(files)
-	return fmt.Sprintf("%s (%d files)", strings.Title(strings.ReplaceAll(name, "-", " ")), len(files))
-}
-
-func (p *Partitioner) findCommonDirectory(files []types.FileChange) string {
-	if len(files) == 0 {
-		return ""
-	}
-
-	// Get directory paths
-	var dirs []string
-	for _, file := range files {
-		dir := strings.Split(file.Path, "/")
-		if len(dir) > 1 {
-			dirs = append(dirs, dir[0])
-		}
-	}
-
-	// Find most common directory
-	dirCount := make(map[string]int)
-	for _, dir := range dirs {
-		dirCount[dir]++
-	}
-
-	maxCount := 0
-	commonDir := ""
-	for dir, count := range dirCount {
-		if count > maxCount && count > len(files)/2 {
-			maxCount = count
-			commonDir = dir
-		}
-	}
-
-	return commonDir
-}
-
-func (p *Partitioner) hasFileType(files []types.FileChange, ext string) bool {
-	for _, file := range files {
-		if strings.HasSuffix(file.Path, ext) {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *Partitioner) containsKeyword(files []types.FileChange, keyword string) bool {
-	for _, file := range files {
-		if strings.Contains(strings.ToLower(file.Path), keyword) {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *Partitioner) calculatePartitionDependencies(filePaths []string, existingPartitions []types.Partition, graph *types.DependencyGraph) []int {
-	var dependencies []int
-	depSet := make(map[int]bool)
-
-	// Check if any files in this partition depend on files in existing partitions
-	for _, filePath := range filePaths {
-		for _, dep := range graph.Adjacency[filePath] {
-			// Find which partition contains the dependency
-			for _, partition := range existingPartitions {
-				for _, partitionFile := range partition.Files {
-					if partitionFile.Path == dep {
-						depSet[partition.ID] = true
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Convert set to slice
-	for id := range depSet {
-		dependencies = append(dependencies, id)
-	}
-
-	// Sort for consistency
-	sort.Ints(dependencies)
-
-	return dependencies
-}
-
-func (p *Partitioner) balancePartitions(partitions []types.Partition, maxSize int) []types.Partition {
-	// For now, just return as-is
-	// Future enhancement: redistribute files for better balance
-	return partitions
-}
-
-func (p *Partitioner) validateExhaustiveness(changedFiles []types.FileChange, partitions []types.Partition) error {
-	// Create a map of all files in partitions
-	partitionFiles := make(map[string]bool)
-	for _, partition := range partitions {
-		for _, file := range partition.Files {
-			partitionFiles[file.Path] = true
-		}
-	}
-
-	// Check for files not included in partitions
-	for _, file := range changedFiles {
-		if !partitionFiles[file.Path] {
-			return fmt.Errorf("file %s not included in any partition", file.Path)
-		}
-	}
-
-	return nil
-}
-
-// createUnanalyzedFilePartitions creates partitions for files not covered by dependency analysis
-func (p *Partitioner) createUnanalyzedFilePartitions(files []types.FileChange, existingPartitions []types.Partition, cfg *types.Config) ([]types.Partition, error) {
-	var partitions []types.Partition
-
-	if len(files) == 0 {
-		return partitions, nil
-	}
-
-	// Group unanalyzed files by type and directory for intelligent partitioning
-	groups := p.groupUnanalyzedFiles(files)
-
-	for groupName, groupFiles := range groups {
-		// Create partitions for this group, respecting size limits
-		groupPartitions := p.createPartitionsForGroup(groupName, groupFiles, len(existingPartitions)+len(partitions), cfg)
-		partitions = append(partitions, groupPartitions...)
-	}
-
-	// If no intelligent grouping worked, fall back to simple size-based partitioning
-	if len(partitions) == 0 {
-		partitions = p.createSimplePartitions(files, len(existingPartitions), cfg, "unanalyzed")
-	}
-
-	return partitions, nil
-}
-
-// groupUnanalyzedFiles groups files by type and directory structure
-func (p *Partitioner) groupUnanalyzedFiles(files []types.FileChange) map[string][]types.FileChange {
-	groups := make(map[string][]types.FileChange)
-
-	for _, file := range files {
-		groupKey := p.determineFileGroup(file)
-		groups[groupKey] = append(groups[groupKey], file)
-	}
-
 	return groups
 }
 
-// determineFileGroup determines which group a file belongs to
-func (p *Partitioner) determineFileGroup(file types.FileChange) string {
-	path := file.Path
-
-	// Group by file extension first
-	if strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".txt") || strings.HasSuffix(path, ".mdx") {
-		return "documentation"
+func (p *Partitioner) calculateDependencyDepth(node string, graph *types.DependencyGraph, visiting map[string]bool) int {
+	if visiting[node] {
+		return 0 // Circular dependency
 	}
 
-	if strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
-		return "configuration"
+	if depth, exists := p.depthCache[node]; exists {
+		return depth
 	}
 
-	if strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".scss") || strings.HasSuffix(path, ".less") {
-		return "styles"
-	}
+	visiting[node] = true
+	maxDepth := 0
 
-	if strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg") ||
-		strings.HasSuffix(path, ".gif") || strings.HasSuffix(path, ".svg") || strings.HasSuffix(path, ".ico") {
-		return "assets"
-	}
-
-	// Group by directory structure
-	parts := strings.Split(path, "/")
-	if len(parts) > 1 {
-		topDir := parts[0]
-		if topDir == "public" || topDir == "static" || topDir == "assets" {
-			return "static-assets"
+	for _, dep := range graph.Adjacency[node] {
+		depth := 1 + p.calculateDependencyDepth(dep, graph, visiting)
+		if depth > maxDepth {
+			maxDepth = depth
 		}
-		if topDir == "docs" || topDir == "documentation" {
-			return "documentation"
-		}
-		if topDir == "config" || topDir == "configs" {
-			return "configuration"
-		}
-		if topDir == "tests" || topDir == "test" || strings.Contains(topDir, "test") {
-			return "tests"
-		}
-
-		// Use the top directory as a fallback group
-		return fmt.Sprintf("dir-%s", topDir)
 	}
 
-	// Final fallback
-	return "miscellaneous"
+	visiting[node] = false
+	if p.depthCache == nil {
+		p.depthCache = make(map[string]int)
+	}
+	p.depthCache[node] = maxDepth
+
+	return maxDepth
 }
 
-// createPartitionsForGroup creates partitions for a specific group of files
-func (p *Partitioner) createPartitionsForGroup(groupName string, files []types.FileChange, startID int, cfg *types.Config) []types.Partition {
-	var partitions []types.Partition
-
-	// Split large groups into multiple partitions
-	for i := 0; i < len(files); i += cfg.MaxFilesPerPartition {
-		end := i + cfg.MaxFilesPerPartition
-		if end > len(files) {
-			end = len(files)
-		}
-
-		partitionFiles := files[i:end]
-		partitionNum := (i / cfg.MaxFilesPerPartition) + 1
-
-		var name, description string
-		if len(files) <= cfg.MaxFilesPerPartition {
-			name = groupName
-			description = fmt.Sprintf("%s files (%d files)", strings.Title(groupName), len(partitionFiles))
-		} else {
-			name = fmt.Sprintf("%s-%d", groupName, partitionNum)
-			description = fmt.Sprintf("%s files part %d (%d files)", strings.Title(groupName), partitionNum, len(partitionFiles))
-		}
-
-		partition := types.Partition{
-			ID:           startID + len(partitions) + 1,
-			Name:         name,
-			Description:  description,
-			Files:        partitionFiles,
-			Dependencies: []int{}, // Unanalyzed files have no dependencies
-			BranchName:   fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, startID+len(partitions)+1, name),
-		}
-
-		partitions = append(partitions, partition)
-	}
-
-	return partitions
+func (p *Partitioner) calculateDependencies(filePaths []string, existingPartitions []types.Partition) []int {
+	// Simplified dependency calculation - can be enhanced
+	return []int{}
 }
 
-// createSimplePartitions creates simple size-based partitions as a fallback
-func (p *Partitioner) createSimplePartitions(files []types.FileChange, startID int, cfg *types.Config, baseName string) []types.Partition {
-	var partitions []types.Partition
+func (p *Partitioner) generateName(files []types.FileChange) string {
+	namer := NewPartitionNamer()
+	return namer.GenerateName(files)
+}
 
-	for i := 0; i < len(files); i += cfg.MaxFilesPerPartition {
-		end := i + cfg.MaxFilesPerPartition
-		if end > len(files) {
-			end = len(files)
-		}
-
-		partitionFiles := files[i:end]
-		partitionNum := (i / cfg.MaxFilesPerPartition) + 1
-
-		name := fmt.Sprintf("%s-%d", baseName, partitionNum)
-		description := fmt.Sprintf("%s files part %d (%d files)", strings.Title(baseName), partitionNum, len(partitionFiles))
-
-		partition := types.Partition{
-			ID:           startID + len(partitions) + 1,
-			Name:         name,
-			Description:  description,
-			Files:        partitionFiles,
-			Dependencies: []int{},
-			BranchName:   fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, startID+len(partitions)+1, name),
-		}
-
-		partitions = append(partitions, partition)
-	}
-
-	return partitions
+func (p *Partitioner) generateDescription(files []types.FileChange) string {
+	namer := NewPartitionNamer()
+	return namer.GenerateDescription(files)
 }
