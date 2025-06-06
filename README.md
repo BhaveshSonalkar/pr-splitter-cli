@@ -174,7 +174,7 @@ excluded_paths:                    # Add project-specific exclusions
 | Language | Plugin | Features |
 |----------|--------|----------|
 | TypeScript/JavaScript | `typescript` | Import/export analysis, AST parsing |
-| Python | `python` | Import dependency tracking *(Example)* |
+| Python | `python` | Import dependency tracking, AST parsing |
 
 ### **Creating Custom Plugins**
 
