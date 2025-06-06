@@ -25,6 +25,7 @@ func Execute() error {
 func init() {
 	// Add child commands here
 	rootCmd.AddCommand(breakCmd)
+	rootCmd.AddCommand(rollbackCmd)
 
 	// Global flags can be added here if needed
 	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.pr-splitter.yaml)")

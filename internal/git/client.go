@@ -443,63 +443,100 @@ func (c *Client) verifyBranch(branch string) error {
 	return nil
 }
 
-// CreateBranches creates branches for each partition
+// CreateBranches creates branches for each partition with rollback support
 func (c *Client) CreateBranches(plan *types.PartitionPlan, cfg *types.Config, sourceBranch string) ([]string, error) {
+	// Store original branch for rollback
+	originalBranch, err := c.getCurrentBranch()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current branch for rollback: %w", err)
+	}
+
 	var createdBranches []string
+	var pushedBranches []string
+
+	// Defer rollback function that will execute if we return with an error
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("🔴 Panic occurred during branch creation, rolling back...\n")
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			panic(r) // Re-panic after cleanup
+		}
+	}()
 
 	// Create branches in dependency order
 	for _, partition := range plan.Partitions {
 		branchName := fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
 
+		// Check if branch already exists
+		if c.branchExists(branchName) {
+			err := fmt.Errorf("branch '%s' already exists - please delete existing branches or use a different prefix", branchName)
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, err
+		}
+
 		// Determine base branch
-		var baseBranch string
-		if len(partition.Dependencies) == 0 {
-			baseBranch = cfg.TargetBranch
-		} else {
-			// Use the last dependency as base (assuming linear chain)
-			lastDep := partition.Dependencies[len(partition.Dependencies)-1]
-			baseBranch = fmt.Sprintf("%s-%d", cfg.BranchPrefix, lastDep)
-			// Find the actual branch name
-			for _, p := range plan.Partitions {
-				if p.ID == lastDep {
-					baseBranch = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, p.ID, p.Name)
-					break
-				}
-			}
+		baseBranch, err := c.determineBaseBranch(partition, plan, cfg)
+		if err != nil {
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, fmt.Errorf("failed to determine base branch for partition %d: %w", partition.ID, err)
 		}
 
 		// Create and checkout new branch
+		fmt.Printf("🌿 Creating branch: %s (from %s)\n", branchName, baseBranch)
 		if err := c.createBranch(branchName, baseBranch); err != nil {
-			return createdBranches, fmt.Errorf("failed to create branch %s: %w", branchName, err)
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, fmt.Errorf("failed to create branch %s: %w", branchName, err)
 		}
+		createdBranches = append(createdBranches, branchName)
 
 		// Apply file changes for this partition
+		fmt.Printf("📝 Applying changes to %s (%d files)\n", branchName, len(partition.Files))
 		if err := c.applyPartitionChanges(&partition, sourceBranch); err != nil {
-			return createdBranches, fmt.Errorf("failed to apply changes to branch %s: %w", branchName, err)
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, fmt.Errorf("failed to apply changes to branch %s: %w", branchName, err)
 		}
 
-		// Commit changes
-		commitMsg := fmt.Sprintf("Partition %d: %s\n\nUpdates %d files for %s",
-			partition.ID, partition.Description, len(partition.Files), partition.Description)
+		// Check if there are actually changes to commit
+		hasChanges, err := c.hasUncommittedChanges()
+		if err != nil {
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, fmt.Errorf("failed to check for changes in branch %s: %w", branchName, err)
+		}
 
-		if err := c.commitChanges(commitMsg); err != nil {
-			return createdBranches, fmt.Errorf("failed to commit changes to branch %s: %w", branchName, err)
+		if hasChanges {
+			// Commit changes
+			commitMsg := fmt.Sprintf("Partition %d: %s\n\nUpdates %d files for %s",
+				partition.ID, partition.Description, len(partition.Files), partition.Description)
+
+			if err := c.commitChanges(commitMsg); err != nil {
+				c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+				return nil, fmt.Errorf("failed to commit changes to branch %s: %w", branchName, err)
+			}
+		} else {
+			fmt.Printf("⚠️  No changes to commit in branch %s\n", branchName)
 		}
 
 		// Push branch
+		fmt.Printf("⬆️  Pushing branch: %s\n", branchName)
 		if err := c.pushBranch(branchName); err != nil {
-			return createdBranches, fmt.Errorf("failed to push branch %s: %w", branchName, err)
+			c.rollbackBranches(createdBranches, pushedBranches, originalBranch)
+			return nil, fmt.Errorf("failed to push branch %s: %w", branchName, err)
 		}
+		pushedBranches = append(pushedBranches, branchName)
 
-		createdBranches = append(createdBranches, branchName)
-		fmt.Printf("✅ Created branch: %s\n", branchName)
+		fmt.Printf("✅ Successfully created and pushed branch: %s\n", branchName)
 	}
 
-	// Return to target branch
-	if err := c.checkoutBranch(cfg.TargetBranch); err != nil {
-		fmt.Printf("⚠️  Warning: Could not return to %s branch: %v\n", cfg.TargetBranch, err)
+	// Return to original branch
+	if err := c.checkoutBranch(originalBranch); err != nil {
+		fmt.Printf("⚠️  Warning: Could not return to original branch %s: %v\n", originalBranch, err)
+		// Try target branch as fallback
+		if err := c.checkoutBranch(cfg.TargetBranch); err != nil {
+			fmt.Printf("⚠️  Warning: Could not return to target branch %s: %v\n", cfg.TargetBranch, err)
+		}
 	}
 
+	fmt.Printf("🎉 Successfully created %d branches\n", len(createdBranches))
 	return createdBranches, nil
 }
 
@@ -616,4 +653,194 @@ func (c *Client) checkoutBranch(branchName string) error {
 	}
 
 	return nil
+}
+
+// getCurrentBranch returns the currently checked out branch
+func (c *Client) getCurrentBranch() (string, error) {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = c.workingDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current branch: %w", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// branchExists checks if a branch exists locally
+func (c *Client) branchExists(branchName string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", branchName)
+	cmd.Dir = c.workingDir
+	return cmd.Run() == nil
+}
+
+// hasUncommittedChanges checks if there are uncommitted changes in the working directory
+func (c *Client) hasUncommittedChanges() (bool, error) {
+	// Check for staged changes
+	cmd := exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = c.workingDir
+	if err := cmd.Run(); err != nil {
+		return true, nil // There are staged changes
+	}
+
+	// Check for unstaged changes
+	cmd = exec.Command("git", "diff", "--quiet")
+	cmd.Dir = c.workingDir
+	if err := cmd.Run(); err != nil {
+		return true, nil // There are unstaged changes
+	}
+
+	// Check for untracked files (that would be added by git add .)
+	cmd = exec.Command("git", "status", "--porcelain")
+	cmd.Dir = c.workingDir
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check git status: %w", err)
+	}
+
+	// If there's any output, there are changes
+	return len(strings.TrimSpace(string(output))) > 0, nil
+}
+
+// determineBaseBranch determines the base branch for a partition based on its dependencies
+func (c *Client) determineBaseBranch(partition types.Partition, plan *types.PartitionPlan, cfg *types.Config) (string, error) {
+	if len(partition.Dependencies) == 0 {
+		return cfg.TargetBranch, nil
+	}
+
+	// Use the last dependency as base (assuming linear chain)
+	lastDep := partition.Dependencies[len(partition.Dependencies)-1]
+
+	// Find the actual branch name for the dependency
+	for _, p := range plan.Partitions {
+		if p.ID == lastDep {
+			baseBranch := fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, p.ID, p.Name)
+			// Verify the base branch exists
+			if !c.branchExists(baseBranch) {
+				return "", fmt.Errorf("dependency branch '%s' does not exist", baseBranch)
+			}
+			return baseBranch, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not find partition with ID %d", lastDep)
+}
+
+// rollbackBranches cleans up created branches when an error occurs
+func (c *Client) rollbackBranches(createdBranches, pushedBranches []string, originalBranch string) {
+	if len(createdBranches) == 0 && len(pushedBranches) == 0 {
+		return
+	}
+
+	fmt.Printf("🔄 Rolling back branch creation...\n")
+
+	// First, checkout to original branch to safely delete other branches
+	if err := c.checkoutBranch(originalBranch); err != nil {
+		fmt.Printf("⚠️  Warning: Could not checkout original branch %s during rollback: %v\n", originalBranch, err)
+	}
+
+	// Delete remote branches (pushed branches)
+	for _, branchName := range pushedBranches {
+		fmt.Printf("🗑️  Deleting remote branch: %s\n", branchName)
+		if err := c.deleteRemoteBranch(branchName); err != nil {
+			fmt.Printf("⚠️  Warning: Could not delete remote branch %s: %v\n", branchName, err)
+		} else {
+			fmt.Printf("✅ Deleted remote branch: %s\n", branchName)
+		}
+	}
+
+	// Delete local branches
+	for _, branchName := range createdBranches {
+		fmt.Printf("🗑️  Deleting local branch: %s\n", branchName)
+		if err := c.deleteLocalBranch(branchName); err != nil {
+			fmt.Printf("⚠️  Warning: Could not delete local branch %s: %v\n", branchName, err)
+		} else {
+			fmt.Printf("✅ Deleted local branch: %s\n", branchName)
+		}
+	}
+
+	fmt.Printf("🔄 Rollback completed. Repository returned to clean state.\n")
+}
+
+// deleteLocalBranch deletes a local branch
+func (c *Client) deleteLocalBranch(branchName string) error {
+	cmd := exec.Command("git", "branch", "-D", branchName)
+	cmd.Dir = c.workingDir
+	return cmd.Run()
+}
+
+// deleteRemoteBranch deletes a remote branch
+func (c *Client) deleteRemoteBranch(branchName string) error {
+	cmd := exec.Command("git", "push", "origin", "--delete", branchName)
+	cmd.Dir = c.workingDir
+	return cmd.Run()
+}
+
+// Public methods for external access
+
+// GetCurrentBranch returns the currently checked out branch (public wrapper)
+func (c *Client) GetCurrentBranch() (string, error) {
+	return c.getCurrentBranch()
+}
+
+// CheckoutBranch checks out an existing branch (public wrapper)
+func (c *Client) CheckoutBranch(branchName string) error {
+	return c.checkoutBranch(branchName)
+}
+
+// DeleteLocalBranch deletes a local branch (public wrapper)
+func (c *Client) DeleteLocalBranch(branchName string) error {
+	return c.deleteLocalBranch(branchName)
+}
+
+// DeleteRemoteBranch deletes a remote branch (public wrapper)
+func (c *Client) DeleteRemoteBranch(branchName string) error {
+	return c.deleteRemoteBranch(branchName)
+}
+
+// GetLocalBranches returns a list of all local branches
+func (c *Client) GetLocalBranches() ([]string, error) {
+	cmd := exec.Command("git", "branch", "--format=%(refname:short)")
+	cmd.Dir = c.workingDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local branches: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var branches []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			branches = append(branches, line)
+		}
+	}
+
+	return branches, nil
+}
+
+// GetRemoteBranches returns a list of all remote branches
+func (c *Client) GetRemoteBranches() ([]string, error) {
+	cmd := exec.Command("git", "branch", "-r", "--format=%(refname:short)")
+	cmd.Dir = c.workingDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get remote branches: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var branches []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.Contains(line, "HEAD") {
+			branches = append(branches, line)
+		}
+	}
+
+	return branches, nil
 }
