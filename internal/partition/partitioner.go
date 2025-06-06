@@ -41,6 +41,29 @@ func (p *Partitioner) CreatePlan(changes []types.FileChange, dependencies []type
 		return nil, fmt.Errorf("failed to build dependency graph: %w", err)
 	}
 
+	// Check for files not covered by dependency analysis (exhaustiveness check)
+	analyzedFiles := make(map[string]bool)
+	for _, node := range graph.Nodes {
+		analyzedFiles[node] = true
+	}
+
+	var unanalyzedFiles []types.FileChange
+	for _, file := range changedFiles {
+		if !analyzedFiles[file.Path] {
+			unanalyzedFiles = append(unanalyzedFiles, file)
+		}
+	}
+
+	if len(unanalyzedFiles) > 0 {
+		fmt.Printf("📋 Found %d files not covered by dependency analysis (will be included separately)\n", len(unanalyzedFiles))
+		// Add these files to the graph as isolated nodes
+		for _, file := range unanalyzedFiles {
+			graph.Nodes = append(graph.Nodes, file.Path)
+			graph.InDegree[file.Path] = 0
+			graph.OutDegree[file.Path] = 0
+		}
+	}
+
 	// Find strongly connected components (circular dependencies)
 	sccs, err := p.findStronglyConnectedComponents(graph)
 	if err != nil {
@@ -57,6 +80,12 @@ func (p *Partitioner) CreatePlan(changes []types.FileChange, dependencies []type
 	partitions, err := p.createPartitions(changedFiles, graph, approvedSCCs, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create partitions: %w", err)
+	}
+
+	// Final exhaustiveness check - ensure ALL changed files are allocated
+	err = p.validateExhaustiveness(changedFiles, partitions)
+	if err != nil {
+		return nil, fmt.Errorf("exhaustiveness validation failed: %w", err)
 	}
 
 	// Build partition plan
@@ -265,6 +294,26 @@ func (p *Partitioner) createPartitions(files []types.FileChange, graph *types.De
 		}
 
 		partitions = append(partitions, dependencyPartitions...)
+	}
+
+	// Update allocated files after dependency-based partitioning
+	for _, partition := range partitions {
+		for _, file := range partition.Files {
+			allocated[file.Path] = true
+		}
+	}
+
+	// Final exhaustiveness check: handle any remaining unallocated files
+	unallocatedFiles := p.getRemainingFiles(files, allocated)
+	if len(unallocatedFiles) > 0 {
+		fmt.Printf("📋 Creating partitions for %d unanalyzed files...\n", len(unallocatedFiles))
+
+		unanalyzedPartitions, err := p.createUnanalyzedFilePartitions(unallocatedFiles, partitions, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create unanalyzed file partitions: %w", err)
+		}
+
+		partitions = append(partitions, unanalyzedPartitions...)
 	}
 
 	// Final validation and adjustment
@@ -650,5 +699,177 @@ func (p *Partitioner) calculatePartitionDependencies(filePaths []string, existin
 func (p *Partitioner) balancePartitions(partitions []types.Partition, maxSize int) []types.Partition {
 	// For now, just return as-is
 	// Future enhancement: redistribute files for better balance
+	return partitions
+}
+
+func (p *Partitioner) validateExhaustiveness(changedFiles []types.FileChange, partitions []types.Partition) error {
+	// Create a map of all files in partitions
+	partitionFiles := make(map[string]bool)
+	for _, partition := range partitions {
+		for _, file := range partition.Files {
+			partitionFiles[file.Path] = true
+		}
+	}
+
+	// Check for files not included in partitions
+	for _, file := range changedFiles {
+		if !partitionFiles[file.Path] {
+			return fmt.Errorf("file %s not included in any partition", file.Path)
+		}
+	}
+
+	return nil
+}
+
+// createUnanalyzedFilePartitions creates partitions for files not covered by dependency analysis
+func (p *Partitioner) createUnanalyzedFilePartitions(files []types.FileChange, existingPartitions []types.Partition, cfg *types.Config) ([]types.Partition, error) {
+	var partitions []types.Partition
+
+	if len(files) == 0 {
+		return partitions, nil
+	}
+
+	// Group unanalyzed files by type and directory for intelligent partitioning
+	groups := p.groupUnanalyzedFiles(files)
+
+	for groupName, groupFiles := range groups {
+		// Create partitions for this group, respecting size limits
+		groupPartitions := p.createPartitionsForGroup(groupName, groupFiles, len(existingPartitions)+len(partitions), cfg)
+		partitions = append(partitions, groupPartitions...)
+	}
+
+	// If no intelligent grouping worked, fall back to simple size-based partitioning
+	if len(partitions) == 0 {
+		partitions = p.createSimplePartitions(files, len(existingPartitions), cfg, "unanalyzed")
+	}
+
+	return partitions, nil
+}
+
+// groupUnanalyzedFiles groups files by type and directory structure
+func (p *Partitioner) groupUnanalyzedFiles(files []types.FileChange) map[string][]types.FileChange {
+	groups := make(map[string][]types.FileChange)
+
+	for _, file := range files {
+		groupKey := p.determineFileGroup(file)
+		groups[groupKey] = append(groups[groupKey], file)
+	}
+
+	return groups
+}
+
+// determineFileGroup determines which group a file belongs to
+func (p *Partitioner) determineFileGroup(file types.FileChange) string {
+	path := file.Path
+
+	// Group by file extension first
+	if strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".txt") || strings.HasSuffix(path, ".mdx") {
+		return "documentation"
+	}
+
+	if strings.HasSuffix(path, ".json") || strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+		return "configuration"
+	}
+
+	if strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".scss") || strings.HasSuffix(path, ".less") {
+		return "styles"
+	}
+
+	if strings.HasSuffix(path, ".png") || strings.HasSuffix(path, ".jpg") || strings.HasSuffix(path, ".jpeg") ||
+		strings.HasSuffix(path, ".gif") || strings.HasSuffix(path, ".svg") || strings.HasSuffix(path, ".ico") {
+		return "assets"
+	}
+
+	// Group by directory structure
+	parts := strings.Split(path, "/")
+	if len(parts) > 1 {
+		topDir := parts[0]
+		if topDir == "public" || topDir == "static" || topDir == "assets" {
+			return "static-assets"
+		}
+		if topDir == "docs" || topDir == "documentation" {
+			return "documentation"
+		}
+		if topDir == "config" || topDir == "configs" {
+			return "configuration"
+		}
+		if topDir == "tests" || topDir == "test" || strings.Contains(topDir, "test") {
+			return "tests"
+		}
+
+		// Use the top directory as a fallback group
+		return fmt.Sprintf("dir-%s", topDir)
+	}
+
+	// Final fallback
+	return "miscellaneous"
+}
+
+// createPartitionsForGroup creates partitions for a specific group of files
+func (p *Partitioner) createPartitionsForGroup(groupName string, files []types.FileChange, startID int, cfg *types.Config) []types.Partition {
+	var partitions []types.Partition
+
+	// Split large groups into multiple partitions
+	for i := 0; i < len(files); i += cfg.MaxFilesPerPartition {
+		end := i + cfg.MaxFilesPerPartition
+		if end > len(files) {
+			end = len(files)
+		}
+
+		partitionFiles := files[i:end]
+		partitionNum := (i / cfg.MaxFilesPerPartition) + 1
+
+		var name, description string
+		if len(files) <= cfg.MaxFilesPerPartition {
+			name = groupName
+			description = fmt.Sprintf("%s files (%d files)", strings.Title(groupName), len(partitionFiles))
+		} else {
+			name = fmt.Sprintf("%s-%d", groupName, partitionNum)
+			description = fmt.Sprintf("%s files part %d (%d files)", strings.Title(groupName), partitionNum, len(partitionFiles))
+		}
+
+		partition := types.Partition{
+			ID:           startID + len(partitions) + 1,
+			Name:         name,
+			Description:  description,
+			Files:        partitionFiles,
+			Dependencies: []int{}, // Unanalyzed files have no dependencies
+			BranchName:   fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, startID+len(partitions)+1, name),
+		}
+
+		partitions = append(partitions, partition)
+	}
+
+	return partitions
+}
+
+// createSimplePartitions creates simple size-based partitions as a fallback
+func (p *Partitioner) createSimplePartitions(files []types.FileChange, startID int, cfg *types.Config, baseName string) []types.Partition {
+	var partitions []types.Partition
+
+	for i := 0; i < len(files); i += cfg.MaxFilesPerPartition {
+		end := i + cfg.MaxFilesPerPartition
+		if end > len(files) {
+			end = len(files)
+		}
+
+		partitionFiles := files[i:end]
+		partitionNum := (i / cfg.MaxFilesPerPartition) + 1
+
+		name := fmt.Sprintf("%s-%d", baseName, partitionNum)
+		description := fmt.Sprintf("%s files part %d (%d files)", strings.Title(baseName), partitionNum, len(partitionFiles))
+
+		partition := types.Partition{
+			ID:           startID + len(partitions) + 1,
+			Name:         name,
+			Description:  description,
+			Files:        partitionFiles,
+			Dependencies: []int{},
+			BranchName:   fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, startID+len(partitions)+1, name),
+		}
+
+		partitions = append(partitions, partition)
+	}
+
 	return partitions
 }

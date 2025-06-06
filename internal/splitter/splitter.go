@@ -99,6 +99,9 @@ func (s *Splitter) splitWithConfig(sourceBranch string, cfg *types.Config) (*typ
 
 	fmt.Printf("📋 Created %d partitions\n", len(plan.Partitions))
 
+	// Show exhaustiveness summary
+	s.displayExhaustivenessSummary(changes, plan)
+
 	// Display partition summary for user review
 	err = s.displayPartitionSummary(plan)
 	if err != nil {
@@ -264,5 +267,50 @@ func (s *Splitter) displaySuccessSummary(result *types.SplitResult, plan *types.
 	fmt.Println("2. Create PRs for each branch in dependency order")
 	fmt.Println("3. Merge branches sequentially")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+}
+
+// displayExhaustivenessSummary shows a summary of analyzed vs unanalyzed files
+func (s *Splitter) displayExhaustivenessSummary(changes []types.FileChange, plan *types.PartitionPlan) {
+	// Count files in partitions by type
+	partitionFileCount := 0
+	unanalyzedPartitionCount := 0
+	dependencyPartitionCount := 0
+
+	for _, partition := range plan.Partitions {
+		partitionFileCount += len(partition.Files)
+
+		// Classify partition types
+		if strings.Contains(partition.Name, "unanalyzed") ||
+			strings.Contains(partition.Name, "documentation") ||
+			strings.Contains(partition.Name, "configuration") ||
+			strings.Contains(partition.Name, "assets") ||
+			strings.Contains(partition.Name, "miscellaneous") ||
+			strings.Contains(partition.Name, "dir-") {
+			unanalyzedPartitionCount++
+		} else {
+			dependencyPartitionCount++
+		}
+	}
+
+	totalFiles := 0
+	for _, change := range changes {
+		if change.IsChanged {
+			totalFiles++
+		}
+	}
+
+	fmt.Println("📊 Exhaustiveness Summary:")
+	fmt.Printf("   • Total changed files: %d\n", totalFiles)
+	fmt.Printf("   • Files in partitions: %d\n", partitionFileCount)
+	fmt.Printf("   • Dependency-based partitions: %d\n", dependencyPartitionCount)
+	fmt.Printf("   • Unanalyzed file partitions: %d\n", unanalyzedPartitionCount)
+
+	if partitionFileCount == totalFiles {
+		fmt.Println("   ✅ All files included (100% exhaustiveness)")
+	} else {
+		fmt.Printf("   ⚠️  Missing files: %d\n", totalFiles-partitionFileCount)
+	}
+
 	fmt.Println()
 }
