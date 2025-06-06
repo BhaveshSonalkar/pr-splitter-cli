@@ -195,19 +195,37 @@ func (c *Client) parseGitDiff(output, sourceBranch string) ([]types.FileChange, 
 		deleted := parts[1]
 		filePath := strings.Join(parts[2:], " ") // Handle spaces in file names
 
+		// Early validation for malformed paths - skip if invalid
+		if !c.isValidFilePath(filePath) {
+			fmt.Printf("⚠️  Warning: Skipping malformed file path: %s\n", filePath)
+			continue
+		}
+
 		// Handle different rename formats
 		var changeType types.ChangeType
 		var oldPath string
 
-		// Check for Git's {oldname => newname} rename format
-		if strings.Contains(filePath, "{") && strings.Contains(filePath, " => ") && strings.Contains(filePath, "}") {
+		// Check for Git's {oldname => newname} rename format with improved validation
+		if c.isValidGitRenameFormat(filePath) {
 			changeType = types.ChangeTypeRename
 			oldPath, filePath = c.parseGitRenameFormat(filePath)
+
+			// Validate the parsed paths
+			if !c.isValidFilePath(oldPath) || !c.isValidFilePath(filePath) {
+				fmt.Printf("⚠️  Warning: Skipping rename with invalid paths: %s -> %s\n", oldPath, filePath)
+				continue
+			}
 		} else if len(parts) == 4 {
 			// Handle "added deleted oldfile newfile" format
 			changeType = types.ChangeTypeRename
 			oldPath = filePath
 			filePath = parts[3]
+
+			// Validate both paths
+			if !c.isValidFilePath(oldPath) || !c.isValidFilePath(filePath) {
+				fmt.Printf("⚠️  Warning: Skipping rename with invalid paths: %s -> %s\n", oldPath, filePath)
+				continue
+			}
 		} else {
 			// Determine change type based on stats
 			if added == "0" && deleted != "0" {
@@ -259,6 +277,37 @@ func (c *Client) parseGitDiff(output, sourceBranch string) ([]types.FileChange, 
 	}
 
 	return changes, nil
+}
+
+// isValidGitRenameFormat checks if a file path represents a valid Git rename format
+func (c *Client) isValidGitRenameFormat(filePath string) bool {
+	// Must contain all three components for a valid rename
+	if !strings.Contains(filePath, "{") || !strings.Contains(filePath, " => ") || !strings.Contains(filePath, "}") {
+		return false
+	}
+
+	// Check that braces are balanced
+	openBraces := strings.Count(filePath, "{")
+	closeBraces := strings.Count(filePath, "}")
+	if openBraces != closeBraces {
+		return false
+	}
+
+	// Check that " => " appears between braces
+	braceStart := strings.Index(filePath, "{")
+	braceEnd := strings.LastIndex(filePath, "}")
+	arrowPos := strings.Index(filePath, " => ")
+
+	if braceStart == -1 || braceEnd == -1 || arrowPos == -1 {
+		return false
+	}
+
+	// Arrow should be between the braces
+	if arrowPos <= braceStart || arrowPos >= braceEnd {
+		return false
+	}
+
+	return true
 }
 
 // parseGitRenameFormat parses Git's {oldname => newname} rename format
@@ -907,37 +956,40 @@ func (c *Client) isValidFilePath(filePath string) bool {
 		return false
 	}
 
-	// Check for other malformed patterns
+	// Check for paths that start with malformed Git rename syntax
+	if strings.HasPrefix(filePath, "{") && !strings.Contains(filePath, " => ") {
+		return false
+	}
+
+	// Check for other clearly malformed patterns
 	malformedPatterns := []string{
-		"{",    // Unmatched opening brace
-		"}",    // Unmatched closing brace at start
-		"//",   // Double slashes (usually indicates path issues)
 		"\x00", // Null bytes
 		"\r",   // Carriage returns in path
 		"\n",   // Newlines in path
 	}
 
 	for _, pattern := range malformedPatterns {
-		if strings.Contains(filePath, pattern) && openBraces != closeBraces {
+		if strings.Contains(filePath, pattern) {
 			return false
 		}
 	}
 
-	// Check for illegal characters on different platforms
-	illegalChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
-	for _, char := range illegalChars {
+	// Be more permissive with special characters that might be legitimate in modern file systems
+	// Only block characters that are definitely problematic across platforms
+	definitelyIllegalChars := []string{"\x00", "\r", "\n"}
+	for _, char := range definitelyIllegalChars {
 		if strings.Contains(filePath, char) {
 			return false
 		}
 	}
 
-	// Check for paths that are too long (reasonable limit)
+	// Check for paths that are unreasonably long
 	if len(filePath) > 4096 {
 		return false
 	}
 
-	// Check for dangerous path traversal patterns
-	if strings.Contains(filePath, "..") {
+	// Be more careful with path traversal - only block obvious attempts
+	if strings.Contains(filePath, "../") || strings.Contains(filePath, "..\\") {
 		return false
 	}
 
