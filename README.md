@@ -6,7 +6,7 @@
 
 **Transform large, unwieldy pull requests into smaller, focused, and reviewable chunks.**
 
-PR Splitter CLI is a powerful command-line tool that intelligently analyzes your git changes and automatically splits them into smaller, logically grouped pull requests based on file dependencies and change patterns.
+PR Splitter CLI intelligently analyzes your git changes and automatically splits them into smaller, logically grouped branches based on file dependencies. **Works immediately with zero configuration** - just point it at your feature branch and go!
 
 ## 🎯 **Why PR Splitter?**
 
@@ -39,39 +39,41 @@ PR Splitter CLI is a powerful command-line tool that intelligently analyzes your
 
 ## 📦 **Installation**
 
-### **From Source**
-
 ```bash
-# Clone the repository
+# Clone and build
 git clone https://github.com/BhaveshSonalkar/pr-splitter-cli.git
 cd pr-splitter-cli
-
-# Build the binary
 go build -o pr-split cmd/pr-split/main.go
 
-# Make it executable and move to PATH
+# Install globally  
 chmod +x pr-split
 sudo mv pr-split /usr/local/bin/
+
+# Verify installation
+pr-split --help
 ```
+
+**That's it!** No dependencies, no config files, no setup. Ready to use.
 
 ## 🚀 **Quick Start**
 
-### **1. Basic Usage**
+### **1. Zero Configuration Usage**
+
+The tool works immediately with sensible defaults - **no config file needed**:
 
 ```bash
-# Split your current feature branch against main
+# 1. Make sure you're on your feature branch
+git checkout feature/large-feature-branch
+
+# 2. Split it! (uses target=main, prefix=pr-split)
 pr-split break feature/large-feature-branch
 
-# Split against a different target branch  
-pr-split break feature/large-feature-branch --target develop
-
-# Use custom branch prefix
-pr-split break feature/large-feature-branch --prefix feat-split
+# That's it! 🎉
 ```
 
-### **2. Interactive Mode**
+### **2. What Happens Next**
 
-The CLI will guide you through the process:
+The CLI will automatically:
 
 ```
 🔍 Analyzing changes between feature/auth-system and main...
@@ -106,6 +108,33 @@ The CLI will guide you through the process:
 🎉 Successfully created 3 branches
 ```
 
+### **3. Common Variations**
+
+```bash
+# Use different target branch
+pr-split break feature/large-feature-branch --target develop
+
+# Use custom branch prefix  
+pr-split break feature/large-feature-branch --prefix feat-split
+
+# Smaller partitions (max 8 files each)
+pr-split break feature/large-feature-branch --max-size 8
+```
+
+### **4. What You Get**
+
+After running, you'll have:
+- ✅ **Multiple focused branches** (e.g., `pr-split-1-auth-core`, `pr-split-2-auth-services`)  
+- ✅ **Proper dependency order** (dependent branches build on previous ones)
+- ✅ **All branches pushed to remote** (ready for PRs)
+- ✅ **Your original branch unchanged**
+
+### **5. Next Steps**
+
+1. **Create Pull Requests**: Go to GitHub/GitLab and create PRs from each `pr-split-*` branch
+2. **Review Order**: Review and merge in dependency order (1 → 2 → 3)
+3. **Cleanup**: Use `pr-split rollback pr-split` to cleanup branches when done
+
 ## 📖 **Detailed Usage**
 
 ### **Command Options**
@@ -122,28 +151,21 @@ Flags:
   -h, --help                 Help for break
 ```
 
-### **Configuration File**
+### **Configuration File** *(Optional)*
 
-Create a `.pr-splitter.yaml` file in your project root:
+**No config file needed!** The tool has sensible defaults. Create a `.pr-splitter.yaml` file **only if** you want to customize defaults:
 
 ```yaml
-target_branch: "develop"
-branch_prefix: "feature-split"
-max_partition_size: 12
-max_dependency_depth: 8
-excluded_paths:
-  - "dist/"
-  - "node_modules/"
-  - "*.test.ts"
-  - "*.spec.js"
-included_extensions:
-  - ".ts"
-  - ".tsx" 
-  - ".js"
-  - ".jsx"
-  - ".go"
-  - ".py"
+# Only add settings you want to change
+target_branch: "develop"           # Default: "main"
+branch_prefix: "feature-split"     # Default: "pr-split"  
+max_partition_size: 12             # Default: 15
+excluded_paths:                    # Add project-specific exclusions
+  - "vendor/"
+  - "*.generated.ts"
 ```
+
+**Pro tip**: Start without a config file. Add one later if you find yourself using the same flags repeatedly.
 
 ## 🔌 **Plugin System**
 
