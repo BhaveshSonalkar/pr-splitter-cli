@@ -25,6 +25,19 @@ type Plugin struct {
 	Extensions  []string `json:"extensions"`
 	Description string   `json:"description"`
 	Version     string   `json:"version"`
+	Runtime     string   `json:"runtime,omitempty"` // e.g., "node", "python", "binary"
+}
+
+// PluginManifest represents the plugin.json manifest file
+type PluginManifest struct {
+	Name        string   `json:"name"`
+	Executable  string   `json:"executable"`
+	Extensions  []string `json:"extensions"`
+	Description string   `json:"description"`
+	Version     string   `json:"version"`
+	Runtime     string   `json:"runtime,omitempty"`
+	Author      string   `json:"author,omitempty"`
+	Homepage    string   `json:"homepage,omitempty"`
 }
 
 // NewManager creates a new plugin manager
@@ -56,27 +69,133 @@ func NewManager() *Manager {
 	return manager
 }
 
-// discoverPlugins finds and registers available plugins
+// discoverPlugins dynamically finds and registers available plugins
 func (m *Manager) discoverPlugins() {
-	// TypeScript plugin
-	tsPlugin := &Plugin{
-		Name:        "typescript",
-		Executable:  filepath.Join(m.pluginDir, "typescript", "analyzer.js"),
-		Extensions:  []string{".ts", ".tsx", ".js", ".jsx"},
-		Description: "TypeScript/JavaScript dependency analyzer",
-		Version:     "1.0.0",
+	// Check if plugins directory exists
+	if _, err := os.Stat(m.pluginDir); os.IsNotExist(err) {
+		fmt.Printf("⚠️  Plugins directory not found: %s\n", m.pluginDir)
+		return
 	}
 
-	// Check if TypeScript plugin exists
-	if _, err := os.Stat(tsPlugin.Executable); err == nil {
-		m.plugins["typescript"] = tsPlugin
-		fmt.Printf("📦 Discovered plugin: %s (%s)\n", tsPlugin.Name, tsPlugin.Description)
+	// Read plugin directories
+	entries, err := os.ReadDir(m.pluginDir)
+	if err != nil {
+		fmt.Printf("⚠️  Failed to read plugins directory: %v\n", err)
+		return
+	}
+
+	pluginCount := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pluginName := entry.Name()
+		pluginPath := filepath.Join(m.pluginDir, pluginName)
+
+		// Try to load plugin from manifest
+		plugin, err := m.loadPluginFromManifest(pluginName, pluginPath)
+		if err != nil {
+			fmt.Printf("⚠️  Failed to load plugin '%s': %v\n", pluginName, err)
+			continue
+		}
+
+		// Validate plugin executable exists
+		if !m.validatePluginExecutable(plugin) {
+			fmt.Printf("⚠️  Plugin '%s' executable not found: %s\n", plugin.Name, plugin.Executable)
+			continue
+		}
+
+		// Register plugin
+		m.plugins[pluginName] = plugin
+		pluginCount++
+
+		fmt.Printf("📦 Discovered plugin: %s v%s (%s)\n",
+			plugin.Name, plugin.Version, plugin.Description)
+	}
+
+	if pluginCount == 0 {
+		fmt.Printf("⚠️  No valid plugins found in %s\n", m.pluginDir)
+		fmt.Printf("💡 Create plugins with a plugin.json manifest file\n")
 	} else {
-		fmt.Printf("⚠️  TypeScript plugin not found at: %s\n", tsPlugin.Executable)
+		fmt.Printf("✅ Loaded %d plugin(s)\n", pluginCount)
+	}
+}
+
+// loadPluginFromManifest loads a plugin from its manifest file
+func (m *Manager) loadPluginFromManifest(pluginName, pluginPath string) (*Plugin, error) {
+	manifestPath := filepath.Join(pluginPath, "plugin.json")
+
+	// Check if manifest exists
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("plugin.json manifest not found")
 	}
 
-	// Future plugins can be added here
-	// pythonPlugin := &Plugin{...}
+	// Read manifest file
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	// Parse manifest
+	var manifest PluginManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	// Validate required fields
+	if manifest.Name == "" {
+		return nil, fmt.Errorf("plugin name is required")
+	}
+	if manifest.Executable == "" {
+		return nil, fmt.Errorf("plugin executable is required")
+	}
+	if len(manifest.Extensions) == 0 {
+		return nil, fmt.Errorf("plugin must specify supported extensions")
+	}
+
+	// Create plugin with absolute executable path
+	executablePath := manifest.Executable
+	if !filepath.IsAbs(executablePath) {
+		executablePath = filepath.Join(pluginPath, executablePath)
+	}
+
+	plugin := &Plugin{
+		Name:        manifest.Name,
+		Executable:  executablePath,
+		Extensions:  manifest.Extensions,
+		Description: manifest.Description,
+		Version:     manifest.Version,
+		Runtime:     manifest.Runtime,
+	}
+
+	return plugin, nil
+}
+
+// validatePluginExecutable checks if the plugin executable exists and is accessible
+func (m *Manager) validatePluginExecutable(plugin *Plugin) bool {
+	// Check if file exists
+	if _, err := os.Stat(plugin.Executable); os.IsNotExist(err) {
+		return false
+	}
+
+	// For runtime-based plugins, also check if the runtime is available
+	if plugin.Runtime != "" {
+		switch plugin.Runtime {
+		case "node":
+			if _, err := exec.LookPath("node"); err != nil {
+				fmt.Printf("⚠️  Plugin '%s' requires Node.js but it's not installed\n", plugin.Name)
+				return false
+			}
+		case "python", "python3":
+			if _, err := exec.LookPath(plugin.Runtime); err != nil {
+				fmt.Printf("⚠️  Plugin '%s' requires %s but it's not installed\n", plugin.Name, plugin.Runtime)
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // AnalyzeDependencies runs appropriate plugins to analyze file dependencies
@@ -180,8 +299,24 @@ func (m *Manager) executePlugin(plugin *Plugin, files []types.FileChange) ([]typ
 		return nil, fmt.Errorf("failed to marshal plugin input: %w", err)
 	}
 
-	// Execute plugin
-	cmd := exec.Command("node", plugin.Executable)
+	// Execute plugin with appropriate runtime
+	var cmd *exec.Cmd
+	if plugin.Runtime != "" {
+		// Use specified runtime
+		cmd = exec.Command(plugin.Runtime, plugin.Executable)
+	} else {
+		// Try to detect runtime from executable extension
+		ext := strings.ToLower(filepath.Ext(plugin.Executable))
+		switch ext {
+		case ".js":
+			cmd = exec.Command("node", plugin.Executable)
+		case ".py":
+			cmd = exec.Command("python3", plugin.Executable)
+		default:
+			// Assume it's a binary
+			cmd = exec.Command(plugin.Executable)
+		}
+	}
 	cmd.Stdin = strings.NewReader(string(inputJSON))
 
 	// Capture output

@@ -1,0 +1,10 @@
+{
+  "name": "TypeScript/JavaScript Analyzer",
+  "executable": "analyzer.js",
+  "extensions": [".ts", ".tsx", ".js", ".jsx"],
+  "description": "TypeScript/JavaScript dependency analyzer using AST analysis",
+  "version": "1.0.0",
+  "runtime": "node",
+  "author": "PR Splitter CLI",
+  "homepage": "https://github.com/your-org/pr-splitter-cli"
+} 

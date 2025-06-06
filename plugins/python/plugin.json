@@ -1,0 +1,10 @@
+{
+  "name": "Python Analyzer",
+  "executable": "analyzer.py",
+  "extensions": [".py", ".pyi"],
+  "description": "Python dependency analyzer using AST analysis",
+  "version": "1.0.0",
+  "runtime": "python3",
+  "author": "PR Splitter CLI",
+  "homepage": "https://github.com/your-org/pr-splitter-cli"
+} 
