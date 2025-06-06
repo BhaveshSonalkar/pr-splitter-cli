@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -299,7 +300,7 @@ func (m *Manager) executePlugin(plugin *Plugin, files []types.FileChange) ([]typ
 		return nil, fmt.Errorf("failed to marshal plugin input: %w", err)
 	}
 
-	// Execute plugin with appropriate runtime
+	// Execute plugin with appropriate runtime and timeout
 	var cmd *exec.Cmd
 	if plugin.Runtime != "" {
 		// Use specified runtime
@@ -317,27 +318,48 @@ func (m *Manager) executePlugin(plugin *Plugin, files []types.FileChange) ([]typ
 			cmd = exec.Command(plugin.Executable)
 		}
 	}
+
+	// Set up input/output pipes
 	cmd.Stdin = strings.NewReader(string(inputJSON))
 
-	// Capture output
-	output, err := cmd.Output()
+	// Add timeout context (30 seconds)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create command with context
+	cmdWithTimeout := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
+	cmdWithTimeout.Stdin = cmd.Stdin
+	cmdWithTimeout.Dir = cmd.Dir
+
+	// Capture output with timeout
+	output, err := cmdWithTimeout.Output()
 	if err != nil {
+		// Check if it was a timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("plugin '%s' timed out after 30 seconds", plugin.Name)
+		}
+
 		// Get stderr for better error reporting
 		if exitError, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("plugin execution failed: %s\nStderr: %s", err, string(exitError.Stderr))
+			return nil, fmt.Errorf("plugin '%s' execution failed: %s\nStderr: %s", plugin.Name, err, string(exitError.Stderr))
 		}
-		return nil, fmt.Errorf("plugin execution failed: %w", err)
+		return nil, fmt.Errorf("plugin '%s' execution failed: %w", plugin.Name, err)
 	}
 
 	// Parse plugin output
 	var pluginOutput types.PluginOutput
 	if err := json.Unmarshal(output, &pluginOutput); err != nil {
-		return nil, fmt.Errorf("failed to parse plugin output: %w\nOutput: %s", err, string(output))
+		return nil, fmt.Errorf("plugin '%s' returned invalid JSON: %w\nOutput: %s", plugin.Name, err, string(output))
+	}
+
+	// Validate plugin output structure
+	if err := m.validatePluginOutput(&pluginOutput, plugin); err != nil {
+		return nil, fmt.Errorf("plugin '%s' output validation failed: %w", plugin.Name, err)
 	}
 
 	// Check for plugin errors
 	if len(pluginOutput.Errors) > 0 {
-		fmt.Printf("⚠️  Plugin reported errors:\n")
+		fmt.Printf("⚠️  Plugin '%s' reported errors:\n", plugin.Name)
 		for _, errMsg := range pluginOutput.Errors {
 			fmt.Printf("   - %s\n", errMsg)
 		}
@@ -480,4 +502,54 @@ func (m *Manager) resolveImportPath(importPath, baseDir string, availableFiles m
 // GetAvailablePlugins returns information about available plugins
 func (m *Manager) GetAvailablePlugins() map[string]*Plugin {
 	return m.plugins
+}
+
+// validatePluginOutput validates the structure and content of plugin output
+func (m *Manager) validatePluginOutput(output *types.PluginOutput, plugin *Plugin) error {
+	// Validate metadata
+	if output.Metadata.PluginName == "" {
+		return fmt.Errorf("plugin metadata missing plugin name")
+	}
+
+	if output.Metadata.PluginVersion == "" {
+		return fmt.Errorf("plugin metadata missing plugin version")
+	}
+
+	if output.Metadata.FilesAnalyzed < 0 {
+		return fmt.Errorf("plugin metadata has invalid files analyzed count: %d", output.Metadata.FilesAnalyzed)
+	}
+
+	// Validate dependencies
+	for i, dep := range output.Dependencies {
+		if dep.From == "" {
+			return fmt.Errorf("dependency %d missing 'from' field", i)
+		}
+
+		if dep.To == "" {
+			return fmt.Errorf("dependency %d missing 'to' field", i)
+		}
+
+		if dep.Type == "" {
+			return fmt.Errorf("dependency %d missing 'type' field", i)
+		}
+
+		// Validate strength values
+		validStrengths := map[types.DependencyStrength]bool{
+			types.StrengthCritical: true,
+			types.StrengthStrong:   true,
+			types.StrengthModerate: true,
+			types.StrengthWeak:     true,
+			types.StrengthCircular: true,
+		}
+
+		if !validStrengths[dep.Strength] {
+			return fmt.Errorf("dependency %d has invalid strength: %s", i, dep.Strength)
+		}
+
+		if dep.Line < 0 {
+			return fmt.Errorf("dependency %d has invalid line number: %d", i, dep.Line)
+		}
+	}
+
+	return nil
 }

@@ -13,6 +13,7 @@ import (
 // Partitioner creates logical partitions based on dependencies
 type Partitioner struct {
 	// Internal state for partitioning
+	depthCache map[string]int // Cache for dependency depth calculations
 }
 
 // NewPartitioner creates a new partitioner instance
@@ -283,11 +284,17 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 	// Group files by their dependency depth (files with no dependencies first)
 	depthGroups := p.groupFilesByDependencyDepth(workingNodes, graph)
 
+	// Track processed depths to prevent infinite loops
+	maxDepth := len(workingNodes) // Upper bound on possible depth
+
 	// Create partitions starting from lowest dependency depth
-	for depth := 0; len(workingNodes) > 0 && len(partitions) < cfg.MaxPartitions-len(existingPartitions); depth++ {
+	for depth := 0; len(workingNodes) > 0 && len(partitions) < cfg.MaxPartitions-len(existingPartitions) && depth <= maxDepth; depth++ {
 		depthFiles := depthGroups[depth]
-		if len(depthFiles) == 0 {
-			// If no files at this depth, add remaining files to avoid infinite loop
+
+		// If no files at this depth and we've processed all possible depths,
+		// handle remaining files in a final catch-all partition
+		if len(depthFiles) == 0 && depth >= maxDepth {
+			// Collect all remaining unallocated files
 			for _, node := range workingNodes {
 				if !allocated[node] {
 					depthFiles = append(depthFiles, node)
@@ -295,12 +302,22 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 			}
 		}
 
+		// Skip empty depth levels
+		if len(depthFiles) == 0 {
+			continue
+		}
+
 		// Create partition for this depth level
 		partitionFiles := make([]types.FileChange, 0)
 		fileCount := 0
 
 		for _, filePath := range depthFiles {
-			if allocated[filePath] || fileCount >= cfg.MaxFilesPerPartition {
+			if allocated[filePath] {
+				continue
+			}
+
+			// Check partition size limit
+			if fileCount >= cfg.MaxFilesPerPartition {
 				break
 			}
 
@@ -309,12 +326,19 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 				partitionFiles = append(partitionFiles, *file)
 				allocated[filePath] = true
 				fileCount++
-
-				// Remove from working nodes
-				workingNodes = p.removeFromSlice(workingNodes, filePath)
 			}
 		}
 
+		// Remove allocated files from working nodes
+		var remainingNodes []string
+		for _, node := range workingNodes {
+			if !allocated[node] {
+				remainingNodes = append(remainingNodes, node)
+			}
+		}
+		workingNodes = remainingNodes
+
+		// Create partition if we have files
 		if len(partitionFiles) > 0 {
 			partition := types.Partition{
 				ID:           len(existingPartitions) + len(partitions) + 1,
@@ -326,6 +350,19 @@ func (p *Partitioner) createDependencyBasedPartitions(files []types.FileChange, 
 
 			partition.BranchName = fmt.Sprintf("%s-%d-%s", cfg.BranchPrefix, partition.ID, partition.Name)
 			partitions = append(partitions, partition)
+		}
+	}
+
+	// Ensure all files are allocated - if not, it's an error condition
+	if len(workingNodes) > 0 {
+		var unallocatedFiles []string
+		for _, node := range workingNodes {
+			if !allocated[node] {
+				unallocatedFiles = append(unallocatedFiles, node)
+			}
+		}
+		if len(unallocatedFiles) > 0 {
+			return partitions, fmt.Errorf("failed to allocate %d files to partitions: %v", len(unallocatedFiles), unallocatedFiles)
 		}
 	}
 
@@ -345,24 +382,36 @@ func (p *Partitioner) groupFilesByDependencyDepth(nodes []string, graph *types.D
 }
 
 // calculateDependencyDepth calculates the maximum dependency depth for a file
-func (p *Partitioner) calculateDependencyDepth(node string, graph *types.DependencyGraph, visited map[string]bool) int {
-	// Avoid cycles
-	if visited[node] {
-		return 0
+func (p *Partitioner) calculateDependencyDepth(node string, graph *types.DependencyGraph, visiting map[string]bool) int {
+	// Check for cycles - if we're currently visiting this node, it's a cycle
+	if visiting[node] {
+		return 0 // Return 0 for circular dependencies
 	}
 
-	visited[node] = true
+	// Use memoization to avoid recalculating depths
+	if depth, exists := p.depthCache[node]; exists {
+		return depth
+	}
+
+	visiting[node] = true
 	maxDepth := 0
 
 	// Check all dependencies
 	for _, dep := range graph.Adjacency[node] {
-		depth := 1 + p.calculateDependencyDepth(dep, graph, visited)
+		depth := 1 + p.calculateDependencyDepth(dep, graph, visiting)
 		if depth > maxDepth {
 			maxDepth = depth
 		}
 	}
 
-	delete(visited, node) // Clean up for other paths
+	visiting[node] = false // Mark as no longer visiting
+
+	// Cache the result
+	if p.depthCache == nil {
+		p.depthCache = make(map[string]int)
+	}
+	p.depthCache[node] = maxDepth
+
 	return maxDepth
 }
 

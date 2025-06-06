@@ -43,17 +43,25 @@ func GetFromUser() (*types.Config, error) {
 		return nil, fmt.Errorf("failed to get target branch: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Println("✅ Configuration complete!")
-	fmt.Println()
-
-	return &types.Config{
+	// Create config and validate
+	config := &types.Config{
 		MaxFilesPerPartition: maxFiles,
 		MaxPartitions:        maxPartitions,
 		BranchPrefix:         branchPrefix,
 		Strategy:             strategy,
 		TargetBranch:         targetBranch,
-	}, nil
+	}
+
+	// Validate configuration consistency
+	if err := validateConfig(config); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("✅ Configuration complete!")
+	fmt.Println()
+
+	return config, nil
 }
 
 // promptForInt prompts user for an integer with validation
@@ -176,4 +184,48 @@ func PromptForSCCDecision(sccFiles []string, currentSize, limit int) (bool, erro
 			fmt.Println("❌ Please choose 1, 2, or 3")
 		}
 	}
+}
+
+// validateConfig validates configuration consistency and constraints
+func validateConfig(cfg *types.Config) error {
+	// Check for reasonable bounds
+	if cfg.MaxFilesPerPartition <= 0 {
+		return fmt.Errorf("max files per partition must be positive, got %d", cfg.MaxFilesPerPartition)
+	}
+
+	if cfg.MaxPartitions <= 0 {
+		return fmt.Errorf("max partitions must be positive, got %d", cfg.MaxPartitions)
+	}
+
+	// Check for excessive values that might indicate user error
+	if cfg.MaxFilesPerPartition > 1000 {
+		return fmt.Errorf("max files per partition seems excessive: %d (consider values under 100)", cfg.MaxFilesPerPartition)
+	}
+
+	if cfg.MaxPartitions > 100 {
+		return fmt.Errorf("max partitions seems excessive: %d (consider values under 20)", cfg.MaxPartitions)
+	}
+
+	// Validate branch prefix format
+	if cfg.BranchPrefix == "" {
+		return fmt.Errorf("branch prefix cannot be empty")
+	}
+
+	if len(cfg.BranchPrefix) > 50 {
+		return fmt.Errorf("branch prefix too long: %d characters (max 50)", len(cfg.BranchPrefix))
+	}
+
+	// Validate target branch
+	if cfg.TargetBranch == "" {
+		return fmt.Errorf("target branch cannot be empty")
+	}
+
+	// Warn about potentially problematic combinations
+	totalCapacity := cfg.MaxFilesPerPartition * cfg.MaxPartitions
+	if totalCapacity < 10 {
+		fmt.Printf("⚠️  Warning: Configuration allows max %d total files across all partitions\n", totalCapacity)
+		fmt.Printf("   Consider increasing MaxFilesPerPartition or MaxPartitions for larger changes\n")
+	}
+
+	return nil
 }

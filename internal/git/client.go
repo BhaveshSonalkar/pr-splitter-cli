@@ -25,15 +25,127 @@ func NewClient() *Client {
 	}
 }
 
-// GetChanges analyzes git changes between source and target branches
-func (c *Client) GetChanges(sourceBranch, targetBranch string) ([]types.FileChange, error) {
-	// First verify branches exist
+// ValidateGitRepository checks if we're in a valid git repository
+func (c *Client) ValidateGitRepository() error {
+	// Check if we're in a git repository
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Dir = c.workingDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("not in a git repository: %w", err)
+	}
+
+	// Check if working directory is clean
+	cmd = exec.Command("git", "diff", "--quiet")
+	cmd.Dir = c.workingDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("working directory has uncommitted changes - please commit or stash changes first")
+	}
+
+	// Check if there are staged changes
+	cmd = exec.Command("git", "diff", "--cached", "--quiet")
+	cmd.Dir = c.workingDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("working directory has staged changes - please commit or reset staged changes first")
+	}
+
+	return nil
+}
+
+// ValidateBranches validates that source and target branches exist and are accessible
+func (c *Client) ValidateBranches(sourceBranch, targetBranch string) error {
+	// Validate branch name format
+	if err := c.validateBranchName(sourceBranch); err != nil {
+		return fmt.Errorf("invalid source branch name '%s': %w", sourceBranch, err)
+	}
+
+	if err := c.validateBranchName(targetBranch); err != nil {
+		return fmt.Errorf("invalid target branch name '%s': %w", targetBranch, err)
+	}
+
+	// Check if branches exist
 	if err := c.verifyBranch(sourceBranch); err != nil {
-		return nil, fmt.Errorf("source branch '%s' not found: %w", sourceBranch, err)
+		return fmt.Errorf("source branch '%s' not found: %w", sourceBranch, err)
 	}
 
 	if err := c.verifyBranch(targetBranch); err != nil {
-		return nil, fmt.Errorf("target branch '%s' not found: %w", targetBranch, err)
+		return fmt.Errorf("target branch '%s' not found: %w", targetBranch, err)
+	}
+
+	// Check if source branch is ahead of target
+	ahead, behind, err := c.getBranchDistance(sourceBranch, targetBranch)
+	if err != nil {
+		return fmt.Errorf("failed to check branch distance: %w", err)
+	}
+
+	if ahead == 0 {
+		return fmt.Errorf("source branch '%s' has no changes compared to '%s'", sourceBranch, targetBranch)
+	}
+
+	fmt.Printf("📊 Branch analysis: %s is %d commits ahead and %d commits behind %s\n",
+		sourceBranch, ahead, behind, targetBranch)
+
+	return nil
+}
+
+// validateBranchName checks if a branch name is valid according to Git rules
+func (c *Client) validateBranchName(branchName string) error {
+	if branchName == "" {
+		return fmt.Errorf("branch name cannot be empty")
+	}
+
+	// Git branch name rules
+	invalidChars := []string{" ", "~", "^", ":", "?", "*", "[", "\\", "..", "@{", "//"}
+	for _, char := range invalidChars {
+		if strings.Contains(branchName, char) {
+			return fmt.Errorf("branch name contains invalid character '%s'", char)
+		}
+	}
+
+	if strings.HasPrefix(branchName, "-") || strings.HasSuffix(branchName, ".") {
+		return fmt.Errorf("branch name cannot start with '-' or end with '.'")
+	}
+
+	return nil
+}
+
+// getBranchDistance returns how many commits ahead and behind source is compared to target
+func (c *Client) getBranchDistance(sourceBranch, targetBranch string) (ahead, behind int, err error) {
+	cmd := exec.Command("git", "rev-list", "--left-right", "--count", fmt.Sprintf("%s...%s", targetBranch, sourceBranch))
+	cmd.Dir = c.workingDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get branch distance: %w", err)
+	}
+
+	parts := strings.Fields(strings.TrimSpace(string(output)))
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("unexpected git rev-list output format")
+	}
+
+	behind, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse behind count: %w", err)
+	}
+
+	ahead, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse ahead count: %w", err)
+	}
+
+	return ahead, behind, nil
+}
+
+// GetChanges analyzes git changes between source and target branches
+func (c *Client) GetChanges(sourceBranch, targetBranch string) ([]types.FileChange, error) {
+	// Validate git repository state first
+	if err := c.ValidateGitRepository(); err != nil {
+		return nil, err
+	}
+
+	// Validate branches
+	if err := c.ValidateBranches(sourceBranch, targetBranch); err != nil {
+		return nil, err
 	}
 
 	// Get file changes with rename detection and line count stats
@@ -54,6 +166,10 @@ func (c *Client) GetChanges(sourceBranch, targetBranch string) ([]types.FileChan
 	relevantChanges, err := c.filterAndEnrichChanges(changes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to process changes: %w", err)
+	}
+
+	if len(relevantChanges) == 0 {
+		return nil, fmt.Errorf("no relevant file changes found between %s and %s", sourceBranch, targetBranch)
 	}
 
 	return relevantChanges, nil
