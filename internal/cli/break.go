@@ -49,7 +49,7 @@ func runBreakCommand(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Create configuration from flags or interactive prompts
-	cfg, err := createConfiguration()
+	cfg, err := createConfiguration(sourceBranch)
 	if err != nil {
 		return fmt.Errorf("failed to create configuration: %w", err)
 	}
@@ -68,7 +68,7 @@ func runBreakCommand(cmd *cobra.Command, args []string) error {
 }
 
 // createConfiguration creates config from flags or interactive prompts
-func createConfiguration() (*types.Config, error) {
+func createConfiguration(sourceBranch string) (*types.Config, error) {
 	// If config file is specified, try to load it first
 	if configFile != "" {
 		cfg, err := config.LoadFromFile(configFile)
@@ -80,18 +80,34 @@ func createConfiguration() (*types.Config, error) {
 		return cfg, nil
 	}
 
-	// Check if any flags were provided (non-interactive mode)
-	if hasExplicitFlags() {
+	// Check if multiple flags were provided (non-interactive mode)
+	if hasMultipleFlags() {
 		return createConfigFromFlags(), nil
 	}
 
-	// No flags provided, use interactive mode
-	return config.GetFromUser()
+	// Interactive mode, but use smart analysis with preferred target if specified
+	s := splitter.New()
+	return s.GetSmartConfiguration(sourceBranch, targetBranch)
 }
 
-// hasExplicitFlags checks if any configuration flags were explicitly set
-func hasExplicitFlags() bool {
-	return targetBranch != "" || branchPrefix != "" || maxSize > 0 || maxDepth > 0 || nonInteractive
+// hasMultipleFlags checks if enough flags were set to warrant non-interactive mode
+func hasMultipleFlags() bool {
+	flagCount := 0
+	if targetBranch != "" {
+		flagCount++
+	}
+	if branchPrefix != "" {
+		flagCount++
+	}
+	if maxSize > 0 {
+		flagCount++
+	}
+	if maxDepth > 0 {
+		flagCount++
+	}
+
+	// Non-interactive flag always enables non-interactive mode
+	return nonInteractive || flagCount >= 2
 }
 
 // createConfigFromFlags creates configuration from command-line flags

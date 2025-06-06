@@ -33,7 +33,7 @@ func New() *Splitter {
 func (s *Splitter) Split(sourceBranch string) (*types.SplitResult, error) {
 	// Get configuration with smart recommendations
 	fmt.Println("🔍 Analyzing repository for configuration recommendations...")
-	cfg, err := s.getSmartConfiguration(sourceBranch)
+	cfg, err := s.getSmartConfiguration(sourceBranch, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
@@ -46,11 +46,21 @@ func (s *Splitter) SplitWithConfig(sourceBranch string, cfg *types.Config) (*typ
 	return s.executeWorkflow(sourceBranch, cfg)
 }
 
+// GetSmartConfiguration exposes smart configuration for CLI usage
+func (s *Splitter) GetSmartConfiguration(sourceBranch, preferredTarget string) (*types.Config, error) {
+	return s.getSmartConfiguration(sourceBranch, preferredTarget)
+}
+
 // getSmartConfiguration gets configuration with file count awareness
-func (s *Splitter) getSmartConfiguration(sourceBranch string) (*types.Config, error) {
-	// Try quick analysis for recommendations (use default target branch for analysis)
-	defaultTarget := config.ConfigDefaults.TargetBranch
-	quickChanges, err := s.gitClient.GetChanges(sourceBranch, defaultTarget)
+func (s *Splitter) getSmartConfiguration(sourceBranch, preferredTarget string) (*types.Config, error) {
+	// Determine target branch for analysis
+	targetBranch := preferredTarget
+	if targetBranch == "" {
+		targetBranch = config.ConfigDefaults.TargetBranch
+	}
+
+	// Try quick analysis for recommendations using the correct target branch
+	quickChanges, err := s.gitClient.GetChanges(sourceBranch, targetBranch)
 	if err != nil {
 		fmt.Println("⚠️  Quick analysis failed, using basic configuration...")
 		return config.GetFromUser()
