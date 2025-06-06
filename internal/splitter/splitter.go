@@ -1,7 +1,10 @@
 package splitter
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"strings"
 
 	"pr-splitter-cli/internal/config"
 	"pr-splitter-cli/internal/git"
@@ -175,18 +178,21 @@ func (s *Splitter) displayPartitionSummary(plan *types.PartitionPlan) error {
 func (s *Splitter) promptForApproval() (bool, error) {
 	fmt.Print("Proceed with this partition plan? [Y/n]: ")
 
-	var input string
-	_, err := fmt.Scanln(&input)
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
 	if err != nil {
-		// If user just pressed enter, default to yes
-		return true, nil
+		return false, fmt.Errorf("failed to read input: %w", err)
 	}
 
+	input = strings.TrimSpace(strings.ToLower(input))
+
 	switch input {
-	case "n", "N", "no", "No":
+	case "n", "no":
 		return false, nil
-	default:
+	case "y", "yes", "":
 		return true, nil
+	default:
+		return true, nil // Default to yes for any other input
 	}
 }
 

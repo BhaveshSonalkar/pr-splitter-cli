@@ -16,7 +16,7 @@ func GetFromUser() (*types.Config, error) {
 	fmt.Println()
 
 	// Get max files per partition
-	maxFiles, err := promptForInt("Max files per partition?", 25, 1, 100)
+	maxFiles, err := promptForInt("Max files per partition?", 15, 1, 100)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get max files per partition: %w", err)
 	}

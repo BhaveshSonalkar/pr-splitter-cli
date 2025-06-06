@@ -23,6 +23,9 @@ func NewPartitioner() *Partitioner {
 
 // CreatePlan creates a partition plan based on file changes and dependencies
 func (p *Partitioner) CreatePlan(changes []types.FileChange, dependencies []types.Dependency, cfg *types.Config) (*types.PartitionPlan, error) {
+	// Initialize clean cache for this planning session
+	p.depthCache = make(map[string]int)
+
 	// Filter to only changed files for partitioning
 	changedFiles := p.filterChangedFiles(changes)
 

@@ -365,9 +365,11 @@ func (c *Client) getAllProjectFiles() ([]types.FileChange, error) {
 }
 
 // isRelevantFile checks if a file should be included in analysis
+// TODO: Make extensions dynamic based on loaded plugins instead of hardcoded
 func (c *Client) isRelevantFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
-	relevantExts := []string{".ts", ".tsx", ".js", ".jsx", ".json"}
+	// Note: These extensions should come from plugin discovery
+	relevantExts := []string{".ts", ".tsx", ".js", ".jsx", ".json", ".py", ".pyi"}
 
 	for _, relevantExt := range relevantExts {
 		if ext == relevantExt {

@@ -165,7 +165,8 @@ func findRemoteBranchesWithPrefix(gitClient *git.Client, prefix string) ([]strin
 
 	var matching []string
 	for _, branch := range branches {
-		// Remove origin/ prefix for consistency
+		// Remove origin/ prefix for consistency (assumes origin remote)
+		// TODO: Detect actual remote name dynamically
 		cleanBranch := strings.TrimPrefix(branch, "origin/")
 		if strings.HasPrefix(cleanBranch, prefix) {
 			matching = append(matching, cleanBranch)
