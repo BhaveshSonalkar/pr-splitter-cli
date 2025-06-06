@@ -54,15 +54,6 @@ chmod +x pr-split
 sudo mv pr-split /usr/local/bin/
 ```
 
-### **Direct Download** *(Coming Soon)*
-
-```bash
-# Download latest release
-curl -L https://github.com/BhaveshSonalkar/pr-splitter-cli/releases/latest/download/pr-split-linux-amd64 -o pr-split
-chmod +x pr-split
-sudo mv pr-split /usr/local/bin/
-```
-
 ## 🚀 **Quick Start**
 
 ### **1. Basic Usage**
