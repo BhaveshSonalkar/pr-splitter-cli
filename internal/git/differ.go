@@ -94,13 +94,19 @@ func (d *Differ) parseDiffLine(line, sourceBranch string) (*types.FileChange, er
 
 	linesAdded, linesDeleted := d.parseLineNumbers(added, deleted)
 
-	content, err := d.getFileContent(filePath, sourceBranch, changeType)
+	// For renamed files, use the new path instead of the git rename format
+	actualPath := filePath
+	if changeType == types.ChangeTypeRename && isGitRenameFormat(filePath) {
+		_, actualPath = parseGitRenameFormat(filePath)
+	}
+
+	content, err := d.getFileContent(actualPath, sourceBranch, changeType)
 	if err != nil && changeType != types.ChangeTypeDelete {
 		fmt.Printf("⚠️  Warning: Could not read content for %s: %v\n", filePath, err)
 	}
 
 	return &types.FileChange{
-		Path:         filePath,
+		Path:         actualPath,
 		ChangeType:   changeType,
 		Content:      content,
 		LinesAdded:   linesAdded,
