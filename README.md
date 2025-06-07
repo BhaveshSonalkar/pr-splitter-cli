@@ -402,24 +402,4 @@ git branch -r | grep pr-split
 
 ---
 
-## 🎉 **Success Stories**
-
-**"Reduced review time from 2 weeks to 3 days"** - Large auth system refactor
-**"Finally got my 80-file PR merged"** - API migration project  
-**"Team velocity increased 40%"** - Microservices refactoring
-**"No more 'LGTM without detailed review'"** - Better code quality
-
----
-
-## 📚 **More Resources**
-
-- **[Installation Guide](docs/installation.md)** - Detailed setup instructions
-- **[Plugin Development](docs/plugins.md)** - Create custom language support  
-- **[Best Practices](docs/best-practices.md)** - Tips for optimal results
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues & solutions
-
----
-
 **Made with ❤️ for better code reviews and faster development cycles.**
-
-*Transform your large PRs into reviewable, focused changes today!* 
